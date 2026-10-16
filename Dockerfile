@@ -79,6 +79,8 @@ EXPOSE 8787
 
 # /healthz never needs credentials, so the probe passes before the first login.
 # (Override DIETLY_HTTP_PORT and this follows; the check is skipped for stdio.)
+# Note: podman's default OCI output drops HEALTHCHECK — build with
+# `podman build --format docker` (or repeat the command in the quadlet unit).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('DIETLY_HTTP_PORT','8787')+'/healthz', timeout=3).read()" || exit 1
 

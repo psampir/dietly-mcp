@@ -145,8 +145,8 @@ def unsafe_bind_reason(host: str, token: str | None) -> str | None:
         f"Refusing to bind {host} without {AUTH_ENV}.\n"
         "This endpoint can read the account and MODIFY the real Dietly order, so it is\n"
         "loopback-only unless a bearer token is set. Either:\n"
-        f"  * export {AUTH_ENV}=$(openssl rand -hex 32)   # clients then send\n"
-        "                                        Authorization: Bearer <token>\n"
+        f"  * export {AUTH_ENV}=<32+ random bytes>   # any shell, e.g. openssl rand -hex 32\n"
+        "     (clients then send 'Authorization: Bearer <token>')\n"
         f"  * or bind {DEFAULT_HOST} (the default) and reach it over an SSH tunnel."
     )
 
