@@ -7,6 +7,7 @@ Everything is mocked through a recording fake; no test touches the network.
 from __future__ import annotations
 
 import json as jsonlib
+import re
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -293,6 +294,13 @@ def test_switch_json_apply(install, capsys: pytest.CaptureFixture[str]) -> None:
     assert fake.switch_calls[0]["dry_run"] is False
 
 
+#: Rich/typer help output is styled when a terminal (or FORCE_COLOR) is present,
+#: and each token is its own span: the literal string ``--json`` only exists once
+#: the escape sequences are removed.
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def test_switch_help_mentions_json(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.run_cli(["switch", "--help"]) == 0
-    assert "--json" in capsys.readouterr().out
+    # Compare the plain text, so the assertion holds on a TTY and in CI alike.
+    assert "--json" in _ANSI.sub("", capsys.readouterr().out)

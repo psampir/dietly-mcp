@@ -20,6 +20,10 @@ env:
   # Keep uv quiet about its progress bar in CI logs. The interpreter is pinned
   # per job through setup-uv's python-version input.
   UV_NO_PROGRESS: "1"
+  # Plain, colour-free tool output: rich styles each help token as its own span
+  # (`-` + `-json`) when colour is on, and styled text is not what the assertions
+  # in the suite are about.
+  NO_COLOR: "1"
 
 jobs:
   test:

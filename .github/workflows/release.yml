@@ -28,6 +28,7 @@ concurrency:
 env:
   UV_PYTHON: "3.13"
   UV_NO_PROGRESS: "1"
+  NO_COLOR: "1"
   IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
