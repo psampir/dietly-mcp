@@ -25,11 +25,20 @@ response.
 SDK note: ``mcp`` 2.x renamed ``FastMCP`` to ``MCPServer``
 (``from mcp.server.mcpserver import MCPServer``); the import below falls back to
 the v1 ``FastMCP`` name so either major works.
+
+Transport: ``dietly-mcp-server`` speaks **stdio** by default and **Streamable
+HTTP** with ``--transport streamable-http`` (or ``DIETLY_TRANSPORT``); the HTTP
+half — host/port, the bearer-token gate and ``GET /healthz`` — lives in
+:mod:`dietly_mcp.http_server`.
 """
 
 from __future__ import annotations
 
+import argparse
 import contextlib
+import os
+import threading
+from collections.abc import Sequence
 from typing import Any
 
 try:  # mcp >= 2 renamed FastMCP to MCPServer
@@ -37,6 +46,7 @@ try:  # mcp >= 2 renamed FastMCP to MCPServer
 except ImportError:  # pragma: no cover - only hit with mcp < 2
     from mcp.server.fastmcp import FastMCP as _MCPServerType
 
+from . import __version__, http_server
 from .client import DietlyClient, resolve_delivery, resolve_slot
 from .config import Settings, load_credentials, load_settings
 from .errors import DietlyError, MissingSessionError, SessionExpiredError
@@ -69,6 +79,7 @@ from .operations import (
 from .session import Session
 
 __all__ = [
+    "build_parser",
     "main",
     "server",
     "day_payload",
@@ -99,17 +110,29 @@ server = _MCPServerType("dietly", instructions=_INSTRUCTIONS)
 
 # --------------------------------------------------------------------------- #
 # Client lifecycle (lazy, with automatic login)
+#
+# Sync tool handlers are dispatched in worker threads (the SDK runs them through
+# ``anyio.to_thread.run_sync``), several of which can be in flight at once on a
+# long-lived HTTP server. So the process-global cache is guarded by a plain
+# ``threading.Lock``: concurrent requests can never build two clients, run two
+# logins, or write the cookie jar at the same time. ``_WRITE_LOCK`` does the same
+# for the write tools — two switches can never interleave.
 # --------------------------------------------------------------------------- #
 _CLIENT: DietlyClient | None = None
+_CLIENT_LOCK = threading.Lock()
+#: Serialises the write tools (dietly_switch / dietly_apply / dietly_revert) so
+#: two switches can never race, over stdio or HTTP.
+_WRITE_LOCK = threading.Lock()
 
 
 def _reset_client() -> None:
     """Drop the cached client (used when the session turns out to be expired)."""
     global _CLIENT
-    if _CLIENT is not None:
+    with _CLIENT_LOCK:
+        client, _CLIENT = _CLIENT, None
+    if client is not None:
         with contextlib.suppress(Exception):
-            _CLIENT.session.close()
-    _CLIENT = None
+            client.session.close()
 
 
 def _load_or_login(settings: Settings) -> Session:
@@ -143,23 +166,31 @@ def _connect() -> DietlyClient:
 
 
 def _client() -> DietlyClient:
-    """Return the cached client, connecting on first use."""
+    """Return the cached client, connecting on first use (thread-safe)."""
     global _CLIENT
-    if _CLIENT is None:
-        _CLIENT = _connect()
-    return _CLIENT
+    with _CLIENT_LOCK:
+        if _CLIENT is None:
+            _CLIENT = _connect()
+        return _CLIENT
+
+
+def _discard(client: DietlyClient) -> None:
+    """Close ``client`` and drop it from the cache (if it is still the cached one)."""
+    global _CLIENT
+    with _CLIENT_LOCK:
+        if _CLIENT is client:
+            _CLIENT = None
+    with contextlib.suppress(Exception):
+        client.session.close()
 
 
 def _run(build: Any) -> dict[str, Any]:
     """Run ``build(client)``, reconnecting once when the session has expired."""
-    global _CLIENT
     client = _client()
     try:
         return build(client)
     except SessionExpiredError:
-        _CLIENT = None
-        with contextlib.suppress(Exception):
-            client.session.close()
+        _discard(client)
         return build(_client())
 
 
@@ -500,17 +531,18 @@ def dietly_switch(
     heuristic — Dietly may still reject the write. Undo with `dietly_revert`.
     """
     try:
-        return _run(
-            lambda client: switch_operation(
-                client,
-                date=date,
-                slot=slot,
-                to_id=to_id,
-                order_id=order_id,
-                dry_run=dry_run,
-                tool="dietly_switch",
+        with _WRITE_LOCK:
+            return _run(
+                lambda client: switch_operation(
+                    client,
+                    date=date,
+                    slot=slot,
+                    to_id=to_id,
+                    order_id=order_id,
+                    dry_run=dry_run,
+                    tool="dietly_switch",
+                )
             )
-        )
     except Exception as exc:  # noqa: BLE001 - the tool boundary must never traceback
         return _failure(exc)
 
@@ -539,15 +571,16 @@ def dietly_apply(
     switches with `dietly_revert`.
     """
     try:
-        return _run(
-            lambda client: apply_operation(
-                client,
-                entries=entries,
-                order_id=order_id,
-                dry_run=dry_run,
-                tool="dietly_apply",
+        with _WRITE_LOCK:
+            return _run(
+                lambda client: apply_operation(
+                    client,
+                    entries=entries,
+                    order_id=order_id,
+                    dry_run=dry_run,
+                    tool="dietly_apply",
+                )
             )
-        )
     except Exception as exc:  # noqa: BLE001 - the tool boundary must never traceback
         return _failure(exc)
 
@@ -571,15 +604,16 @@ def dietly_revert(
     itself audited (`event: "revert"`) and can be re-applied by hand.
     """
     try:
-        return _run(
-            lambda client: revert_operation(
-                client,
-                audit_id=audit_id,
-                date=date,
-                slot=slot,
-                tool="dietly_revert",
+        with _WRITE_LOCK:
+            return _run(
+                lambda client: revert_operation(
+                    client,
+                    audit_id=audit_id,
+                    date=date,
+                    slot=slot,
+                    tool="dietly_revert",
+                )
             )
-        )
     except Exception as exc:  # noqa: BLE001 - the tool boundary must never traceback
         return _failure(exc)
 
@@ -587,9 +621,83 @@ def dietly_revert(
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
-def main() -> None:
-    """Run the MCP server over stdio (the transport OpenCode spawns)."""
-    server.run("stdio")
+def build_parser() -> argparse.ArgumentParser:
+    """Return the ``dietly-mcp-server`` argument parser.
+
+    Every option has an environment fallback that the option overrides, so a
+    container can be configured with env vars alone:
+
+    ``--transport``/``DIETLY_TRANSPORT``, ``--host``/``DIETLY_HTTP_HOST``,
+    ``--port``/``DIETLY_HTTP_PORT``.
+    """
+    parser = argparse.ArgumentParser(
+        prog="dietly-mcp-server",
+        description=(
+            "Dietly MCP server: five read tools plus three guarded write tools "
+            "(dry-run by default, audited, revertible). Speaks MCP over stdio by "
+            "default, or Streamable HTTP with --transport streamable-http. In HTTP "
+            "mode a non-loopback bind requires MCP_AUTH_TOKEN; GET /healthz is "
+            "always public and never returns account data."
+        ),
+    )
+    parser.add_argument(
+        "--transport",
+        choices=list(http_server.TRANSPORTS),
+        default=None,
+        help=(
+            "MCP transport: 'stdio' (default; what local clients spawn) or "
+            f"'streamable-http' (network; env {http_server.TRANSPORT_ENV})."
+        ),
+    )
+    parser.add_argument(
+        "--host",
+        default=None,
+        help=(
+            "Streamable-HTTP bind address (default "
+            f"{http_server.DEFAULT_HOST}; env {http_server.HOST_ENV}). A non-loopback "
+            f"address requires {http_server.AUTH_ENV}."
+        ),
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help=(
+            f"Streamable-HTTP port (default {http_server.DEFAULT_PORT}; "
+            f"env {http_server.PORT_ENV})."
+        ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="Print the version and exit.",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """Run the MCP server over stdio (default) or Streamable HTTP.
+
+    Args:
+        argv: arguments to parse; defaults to ``sys.argv[1:]``. Useful in tests.
+
+    Raises:
+        SystemExit: an invalid ``--transport``/``--port``, or an HTTP bind that is
+            not loopback while ``MCP_AUTH_TOKEN`` is unset.
+    """
+    args = build_parser().parse_args(argv)
+    transport = http_server.resolve_transport(
+        args.transport, os.environ.get(http_server.TRANSPORT_ENV)
+    )
+    if transport == http_server.STDIO_TRANSPORT:
+        server.run("stdio")
+        return
+
+    host = http_server.resolve_host(args.host, os.environ.get(http_server.HOST_ENV))
+    port = http_server.resolve_port(args.port, os.environ.get(http_server.PORT_ENV))
+    token = (os.environ.get(http_server.AUTH_ENV) or "").strip() or None
+    http_server.serve(server, host=host, port=port, token=token, transport=transport)
 
 
 if __name__ == "__main__":

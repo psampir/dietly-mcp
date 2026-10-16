@@ -8,8 +8,17 @@ Secrets live *outside* the repository:
 * session cookie jar: ``~/.local/state/dietly-mcp/session.json``;
 * append-only write audit log: ``~/.local/state/dietly-mcp/audit.jsonl``.
 
+Both roots are **overridable for containers**: ``DIETLY_CONFIG_DIR`` replaces the
+whole config directory (so ``DIETLY_CONFIG_DIR=/config`` puts the credentials at
+``/config/credentials.env``) and ``DIETLY_STATE_DIR`` replaces the whole state
+directory (so ``DIETLY_STATE_DIR=/data`` puts the cookie jar at
+``/data/session.json`` and the audit log at ``/data/audit.jsonl``). The narrower
+``DIETLY_CREDENTIALS_FILE`` / ``DIETLY_SESSION_FILE`` / ``DIETLY_AUDIT_FILE``
+variables override one path each and win over the directory variables.
+
 This module never prints secret values. It only warns about weak file
-permissions.
+permissions; the ``*_configured`` helpers return booleans so callers (the
+``/healthz`` endpoint) can report readiness without exposing anything.
 """
 
 from __future__ import annotations
@@ -21,7 +30,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .errors import MissingCredentialsError
+from .errors import DietlyError, MissingCredentialsError
 from .logic import DEFAULT_EDIT_CUTOFF_HOURS
 
 APP_NAME = "dietly-mcp"
@@ -50,14 +59,28 @@ _WARNED_PERMISSIONS: set[Path] = set()
 # Paths
 # --------------------------------------------------------------------------- #
 def config_dir() -> Path:
-    """Return the user config directory (``$XDG_CONFIG_HOME`` aware)."""
+    """Return the user config directory.
+
+    ``DIETLY_CONFIG_DIR`` wins outright (containers mount ``/config``); otherwise
+    the XDG default (``$XDG_CONFIG_HOME`` aware) plus ``/dietly-mcp``.
+    """
+    override = os.environ.get(ENV_PREFIX + "CONFIG_DIR")
+    if override:
+        return Path(override).expanduser()
     base = os.environ.get("XDG_CONFIG_HOME")
     root = Path(base).expanduser() if base else Path.home() / ".config"
     return root / APP_NAME
 
 
 def state_dir() -> Path:
-    """Return the user state directory (``$XDG_STATE_HOME`` aware)."""
+    """Return the user state directory.
+
+    ``DIETLY_STATE_DIR`` wins outright (containers mount ``/data``); otherwise
+    the XDG default (``$XDG_STATE_HOME`` aware) plus ``/dietly-mcp``.
+    """
+    override = os.environ.get(ENV_PREFIX + "STATE_DIR")
+    if override:
+        return Path(override).expanduser()
     base = os.environ.get("XDG_STATE_HOME")
     root = Path(base).expanduser() if base else Path.home() / ".local" / "state"
     return root / APP_NAME
@@ -233,6 +256,25 @@ def load_credentials(path: Path | str | None = None, *, env: bool = True) -> Cre
             "  DIETLY_PASSWORD=secret"
         )
     raise MissingCredentialsError(missing_hint)
+
+
+def credentials_configured(path: Path | str | None = None, *, env: bool = True) -> bool:
+    """Return whether an email/password pair is available — as a **boolean only**.
+
+    Never returns (or logs) the values; used by ``GET /healthz`` so a container
+    orchestrator can see readiness without any account data leaving the process.
+    """
+    try:
+        load_credentials(path, env=env)
+    except (DietlyError, OSError):
+        return False
+    return True
+
+
+def session_configured(path: Path | str | None = None) -> bool:
+    """Return whether a stored session cookie jar exists (boolean only)."""
+    file_path = Path(path) if path is not None else default_session_path()
+    return file_path.is_file()
 
 
 # --------------------------------------------------------------------------- #
