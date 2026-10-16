@@ -1,0 +1,165 @@
+name: Release
+
+# Publishing is triggered by a version tag only: `git tag v0.1.0 && git push origin v0.1.0`.
+# The workflow never creates tags itself, and it fails early when the tag and
+# pyproject.toml disagree, so a mistyped tag cannot produce a mislabelled image.
+#
+# It lints + tests the tagged commit first, then builds a multi-arch image
+# (linux/amd64, linux/arm64) with provenance + SBOM and pushes it to GHCR, and
+# finally opens a GitHub Release with generated notes.
+#
+# Tags published for vX.Y.Z:  X.Y.Z, X.Y, latest   (ghcr.io/psampir/dietly-mcp)
+# Pre-release tags (e.g. v0.2.0-rc1) get X.Y.Z only — no `latest`.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# packages: write → push to GHCR; contents: write → create the GitHub Release.
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  UV_PYTHON: "3.13"
+  UV_NO_PROGRESS: "1"
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  # ------------------------------------------------------------------------- #
+  # Gate: the tag must match the version being released, and the code must pass
+  # ------------------------------------------------------------------------- #
+  verify:
+    name: verify tag + lint + tests
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: The tag must match project.version in pyproject.toml
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag_version="${TAG#v}"
+          project_version="$(python3 -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+          if [ -z "${tag_version}" ]; then
+            echo "::error title=Bad tag::'${TAG}' must look like vX.Y.Z."
+            exit 1
+          fi
+          if [ "${tag_version}" != "${project_version}" ]; then
+            echo "::error title=Version mismatch::tag '${TAG}' implies version '${tag_version}', but pyproject.toml declares '${project_version}'. Bump project.version (uv version ${tag_version}) or move the tag."
+            exit 1
+          fi
+          echo "Releasing ${project_version} from tag ${TAG}."
+          echo "version=${project_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install the locked environment
+        run: uv sync --frozen --extra dev
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Test
+        run: uv run pytest -q
+
+  # ------------------------------------------------------------------------- #
+  # Publish the multi-arch image to GHCR
+  # ------------------------------------------------------------------------- #
+  publish:
+    name: build + push image
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      # arm64 emulation on an amd64 runner.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags from the git tag
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # vX.Y.Z → X.Y.Z and X.Y (+ latest for a final, not a pre-release).
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.verify.outputs.version }}
+
+      - name: Build and push (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Attach build provenance and an SBOM to the image (verifiable with
+          # `docker buildx imagetools inspect <image>`).
+          provenance: mode=max
+          sbom: true
+          # Reuse the GitHub Actions cache between runs.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summarise the pushed tags
+        run: |
+          {
+            echo "### Published \`${{ env.IMAGE }}\`"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------------------- #
+  # GitHub Release with generated notes
+  # ------------------------------------------------------------------------- #
+  release:
+    name: create GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Create the release from the tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "${GITHUB_REF_NAME}" \
+            --verify-tag \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --notes "Container image: \`${IMAGE}:${version}\` (linux/amd64, linux/arm64). Run it with the recipe in docs/deploy.md."

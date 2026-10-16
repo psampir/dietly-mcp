@@ -1,0 +1,42 @@
+# Build context for the container image. The image needs pyproject.toml, uv.lock,
+# README.md (the project readme) and src/ — everything else is noise, or worse:
+# a local virtualenv or a credential/session file must never enter a layer.
+
+# Version control and CI
+.git
+.gitignore
+.github
+
+# Local environments and caches
+.venv
+venv
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Tests, docs and notes (CI runs these, the image does not)
+tests/
+docs/
+THIRD_PARTY.md
+
+# Secrets and machine state — never in a layer
+.env
+.env.*
+credentials*
+session*.json
+*.session.json
+secrets*
+*.pem
+*.key
+data/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

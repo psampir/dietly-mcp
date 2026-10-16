@@ -159,10 +159,10 @@ Notes:
 
 ## MCP server
 
-`dietly-mcp-server` speaks **MCP over stdio** and exposes eight tools: five **read-only** ones and
-three **write** ones. It wraps the same `DietlyClient` as the CLI, and the write tools call the same
-`dietly_mcp.operations` functions as `dietly-mcp switch`/`revert` — the guardrail, the dry-run
-semantics and the audit records cannot drift between the two front ends.
+`dietly-mcp-server` speaks **MCP over stdio** (default) or **Streamable HTTP** and exposes eight tools:
+five **read-only** ones and three **write** ones. It wraps the same `DietlyClient` as the CLI, and the
+write tools call the same `dietly_mcp.operations` functions as `dietly-mcp switch`/`revert` — the
+guardrail, the dry-run semantics and the audit records cannot drift between the two front ends.
 
 **Read tools** (never modify anything):
 
@@ -199,6 +199,73 @@ Design notes:
 - **Agents: preview first.** Call a write tool with the default dry run, show the preview to the user,
   get explicit approval, then repeat with `dry_run=False`. Undo with `dietly_revert`.
 - Polish data (`Obiad`, `Śniadanie`, dish names, allergens) is returned **verbatim**.
+- Write tools are **serialised** (a process-wide lock): two switches can never race, and the
+  client/session cache is guarded for concurrent requests.
+
+### Streamable HTTP transport
+
+For a long-lived server (containers, remote clients such as Open WebUI) the same binary serves MCP
+over **Streamable HTTP** at `/mcp`, plus a public `/healthz`:
+
+```fish
+dietly-mcp-server --transport streamable-http            # 127.0.0.1:8787 by default
+dietly-mcp-server --transport streamable-http --host 0.0.0.0 --port 8787
+```
+
+| Option | Env | Default | Notes |
+|---|---|---|---|
+| `--transport` | `DIETLY_TRANSPORT` | `stdio` | `stdio` or `streamable-http` |
+| `--host` | `DIETLY_HTTP_HOST` | `127.0.0.1` | a **non-loopback** bind requires `MCP_AUTH_TOKEN` |
+| `--port` | `DIETLY_HTTP_PORT` | `8787` | |
+| `--version` | — | | print the version and exit |
+
+Safety (this endpoint can modify your real order):
+
+- **`MCP_AUTH_TOKEN` set** → every request except `GET /healthz` must send
+  `Authorization: Bearer <token>`; anything else is answered `401` before a tool runs.
+- **unset** → only loopback binds are allowed; a wider bind is **refused at start-up** with a message
+  that says exactly what to do.
+- **No credentials needed to start**: the server boots and serves `/healthz` regardless, and tool
+  calls return the usual actionable `{"ok": false, ...}` errors.
+- `/healthz` (no auth) reports `service`, `version`, `transport`, `mcpPath`, `uptimeSeconds`,
+  `authRequired` and the booleans `credentialsConfigured` / `sessionConfigured` — never an email,
+  token, cookie or order datum.
+- Logs go to **stdout** (containers, `podman logs`); stdio mode is untouched.
+
+Config/state locations are container-friendly: `DIETLY_CONFIG_DIR` (e.g. `/config`) and
+`DIETLY_STATE_DIR` (e.g. `/data`) replace the XDG roots; `DIETLY_CREDENTIALS_FILE`,
+`DIETLY_SESSION_FILE` and `DIETLY_AUDIT_FILE` override single paths.
+
+### Deployment (container)
+
+A multi-stage image (non-root, `python:3.13-slim`, `uv sync --frozen`) is built and published to GHCR
+by CI on every `v*` tag: `ghcr.io/psampir/dietly-mcp` (`X.Y.Z`, `X.Y`, `latest`; `linux/amd64` +
+`linux/arm64`, with provenance and SBOM).
+
+```fish
+podman run -d --name dietly-mcp --restart=unless-stopped \
+  -p 127.0.0.1:8787:8787 \
+  -e MCP_AUTH_TOKEN=(openssl rand -hex 32) \
+  -e DIETLY_EMAIL=you@example.com -e DIETLY_PASSWORD=<your-password> \
+  -v dietly-data:/data \
+  ghcr.io/psampir/dietly-mcp:0.1.0
+
+curl -s http://127.0.0.1:8787/healthz     # 200 JSON, no auth, no account data
+```
+
+Full recipes — credentials from env or a mounted `/config/credentials.env`, docker-compose, a
+**Podman quadlet** unit, reverse-proxy/TLS notes (SSE needs `proxy_buffering off`), token rotation,
+updating and a troubleshooting table — are in [docs/deploy.md](docs/deploy.md).
+
+Publishing a release is just a tag (the workflow lints, tests, cross-builds and pushes, then creates
+the GitHub Release):
+
+```fish
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+After the **first** push, set the GHCR package visibility to **Public** once (GitHub → profile →
+*Packages* → `dietly-mcp` → *Package settings*), or `podman login ghcr.io` before pulling.
 
 ### OpenCode (V2)
 
@@ -251,16 +318,20 @@ switch dry-run → switch apply) against the mocked HTTP layer, plus CSRF-rotati
 in-memory transport with a fake client, and covers the shared write path: a dry run sends nothing
 (zero applied writes), an unoffered target is refused with the valid ids, `apply` fails fast on shape
 problems and reports per-entry `ok`/`error` on a partial failure, and revert refuses a gone dish or a
-locked day. `tests/test_audit.py` covers the append-only log (mode `600`, junk lines, lookups) and
-`tests/test_cli_write.py` pins the CLI surface (`switch --json`, `revert`, `audit`).
-`tests/test_logic.py` and `tests/test_cli_polish.py` cover the shared date/editable policy and the
-CLI polish.
+locked day. `tests/test_http_transport.py` drives the Streamable-HTTP app in-process (Starlette's
+`TestClient`, no sockets): the bearer matrix (missing/wrong/valid), that a `401` never reaches the
+account, "loopback without a token is fine but a wider bind is refused", the `/healthz` shape and that
+it leaks nothing even with credentials and a session present, booting without credentials, flag/env
+resolution, and that concurrent writes never overlap. `tests/test_audit.py` covers the append-only log
+(mode `600`, junk lines, lookups) and `tests/test_cli_write.py` pins the CLI surface (`switch --json`,
+`revert`, `audit`). `tests/test_logic.py` and `tests/test_cli_polish.py` cover the shared
+date/editable policy and the CLI polish.
 
 ## Layout
 
 ```
 src/dietly_mcp/
-├── config.py      # paths, credentials file parsing, warnings, settings
+├── config.py      # paths (env-overridable, container-friendly), credentials, settings
 ├── http.py        # IPv4-pinned transport, explicit timeouts, bounded retries
 ├── session.py     # CSRF handshake, login, cookie-jar persistence (0600), validation
 ├── client.py      # DietlyClient — read calls + the guarded single switch
@@ -269,18 +340,31 @@ src/dietly_mcp/
 ├── errors.py      # DietlyError hierarchy
 ├── audit.py       # append-only JSONL write log (0600) + lookups used by revert
 ├── operations.py  # shared write path: switch/apply/revert + payloads/error mapping
-├── mcp_server.py  # MCP server (stdio): five read tools + three write tools
+├── mcp_server.py  # MCP tools (5 read + 3 write), client cache/write locks, entry point
+├── http_server.py # Streamable-HTTP transport: ASGI app, bearer gate, /healthz, bind policy
 └── cli.py         # Typer app (`dietly-mcp`)
+
+Dockerfile .dockerignore
+.github/workflows/{ci,release}.yml
+docs/deploy.md
 ```
 
-## Status of this phase (F3)
+## Status of this phase (F4 + F5)
 
-Implemented and covered by mocked tests: everything from F1 and F2 (credentials loading, the CSRF
-login handshake, cookie persistence, orders, deliveries, day menus, switch options, the guarded
-single-meal switch, the five read-only MCP tools and the shared date/editable policy) **plus** the
-write path: the three MCP write tools (`dietly_switch`, `dietly_apply`, `dietly_revert`), the
-append-only audit log, the CLI parity commands (`switch`, `revert`, `audit`) and the shared
-`dietly_mcp.operations` module that guarantees both front ends behave identically.
+Implemented and covered by mocked tests: everything from F1–F3 (credentials loading, the CSRF login
+handshake, cookie persistence, orders, deliveries, day menus, switch options, the guarded
+single-meal switch, the five read-only MCP tools, the three write tools with their audit log and the
+shared `dietly_mcp.operations` policy) **plus**:
+
+- **F4 — HTTP transport**: `--transport stdio|streamable-http` + `DIETLY_TRANSPORT`,
+  `--host`/`--port` + `DIETLY_HTTP_HOST`/`DIETLY_HTTP_PORT`, a bearer-token gate that refuses
+  non-loopback binds without `MCP_AUTH_TOKEN`, a credential-free public `GET /healthz` that discloses
+  booleans only, stdout logging, concurrency-safe client/session handling and serialised writes, and
+  `DIETLY_CONFIG_DIR`/`DIETLY_STATE_DIR` for containers;
+- **F5 — container + CI/CD**: a multi-stage non-root `Dockerfile` (uv + `uv sync --frozen`, `/data`
+  volume, healthcheck, `dietly-mcp-server` entry point), `.dockerignore`, `ci.yml` (lint + tests on
+  PR/push) and `release.yml` (tag → verify version, test, cross-build amd64+arm64 with provenance and
+  SBOM, push to GHCR, create the GitHub Release).
 
 Verified against the live API on 2026-10-16 (order `3597452`, catering `kuchniavikinga`, diet
 "Wybór menu", 2000 kcal):
@@ -297,6 +381,9 @@ Verified against the live API on 2026-10-16 (order `3597452`, catering `kuchniav
 
 Nothing else was written; no other day, slot or order was touched.
 
-Phase 4 (F4) will add an **HTTP transport** (streamable HTTP) alongside stdio; phase 5 (F5) will add
-**Docker + CI/CD**.
+The HTTP transport and the container were validated locally against a **dummy** token and dummy
+credentials (never the real account): the image starts, `GET /healthz` answers 200 without
+credentials, an unauthenticated `POST /mcp` is `401`, and an authenticated SDK client sees the eight
+`dietly_*` tools. The exact commands and output are in the mission report; the reusable recipes are in
+[docs/deploy.md](docs/deploy.md).
 

@@ -1,0 +1,47 @@
+name: CI
+
+# Lint and the full mocked test suite on every push to main and every pull request.
+# No credentials are needed: the suite is entirely mocked (no network, no Dietly
+# account, no secrets) and the HTTP-transport tests drive the ASGI app in-process.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep uv quiet about its progress bar in CI logs. The interpreter is pinned
+  # per job through setup-uv's python-version input.
+  UV_NO_PROGRESS: "1"
+
+jobs:
+  test:
+    name: ruff + pytest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Install the locked environment
+        # --frozen: fail instead of silently re-resolving uv.lock; --extra dev
+        # brings in pytest and ruff (the locked dev tools).
+        run: uv sync --frozen --extra dev
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Test
+        run: uv run pytest -q
