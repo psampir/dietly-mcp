@@ -1,8 +1,10 @@
 """Read/write client for the Dietly private JSON API.
 
-All endpoints are called on ``https://dietly.pl/api/...`` with the cookie session
-created by :mod:`dietly_mcp.session`. The only write operation this phase
-supports is a single meal switch, and it is dry-run by default.
+All endpoints are called on ``https://panel.dietly.pl/api/...`` (the host the
+panel SPA itself uses, and the host the login ``SESSION`` cookie is scoped to)
+with the cookie session created by :mod:`dietly_mcp.session`. The only write
+operation this phase supports is a single meal switch, and it is dry-run by
+default.
 
 Reverse-engineered call contract: see ``docs/api-notes.md``.
 """
@@ -16,10 +18,12 @@ import httpx
 
 from .errors import (
     ApiError,
+    CsrfTokenError,
     NetworkError,
     NotFoundError,
     UnknownMealOptionError,
 )
+from .http import send_with_retries
 from .models import (
     DayMeal,
     Delivery,
@@ -141,14 +145,42 @@ class DietlyClient:
         company_id: str | None = None,
         params: dict[str, Any] | None = None,
     ) -> Any:
-        """Perform an API call, map errors and return the parsed JSON body."""
+        """Perform an API call, map errors and return the parsed JSON body.
+
+        The CSRF token is attached to every call (like the SPA does). If Spring
+        answers ``403`` because the token it holds has rotated, the token is
+        refreshed once and the call retried — this is what keeps the write
+        (``switch``) path working across long-lived sessions.
+        """
         url = f"{self.settings.base_url}{path}"
-        headers = api_headers(self.settings, company_id or self.default_company_id)
-        try:
-            response = self.session.http.request(method, url, headers=headers, params=params)
-        except httpx.HTTPError as exc:
-            raise NetworkError(f"Could not reach {url}: {exc}.") from exc
-        check_response(response)
+        slug = company_id or self.default_company_id
+
+        response: httpx.Response | None = None
+        for attempt in range(2):
+            headers = api_headers(
+                self.settings, slug, csrf_token=self.session.csrf_token()
+            )
+            try:
+                response = send_with_retries(
+                    self.session.http,
+                    method,
+                    url,
+                    retries=self.settings.retries,
+                    headers=headers,
+                    params=params,
+                )
+            except httpx.HTTPError as exc:
+                raise NetworkError(f"Could not reach {url}: {exc}.") from exc
+            try:
+                check_response(response)
+            except CsrfTokenError:
+                if attempt == 0:
+                    self.session.prime_csrf(force=True)
+                    continue
+                raise
+            break
+
+        assert response is not None  # pragma: no cover - loop sets it or raises
         if not response.content:
             return {}
         try:

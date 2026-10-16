@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 import pytest
+from conftest import CSRF_REJECTION_BODY, CSRF_TOKEN, csrf_cookie_header
 
 from dietly_mcp import cli
 from dietly_mcp.client import DietlyClient, resolve_delivery, resolve_slot
@@ -21,6 +22,7 @@ from dietly_mcp.config import Settings
 from dietly_mcp.errors import (
     ApiError,
     CateringMismatchError,
+    CsrfTokenError,
     NetworkError,
     NotFoundError,
     UnknownMealOptionError,
@@ -319,6 +321,80 @@ def test_network_failure_is_wrapped(
         client.get_orders()
 
     assert "Could not reach" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------- #
+# CSRF handling in the client
+# --------------------------------------------------------------------------- #
+def test_read_requests_carry_the_csrf_token(
+    client: DietlyClient, responses: dict[str, httpx.Response], seen: list[httpx.Request]
+) -> None:
+    _register_common(responses)
+    client.session.http.cookies.set("XSRF-TOKEN", CSRF_TOKEN, domain="panel.dietly.pl", path="/")
+
+    client.get_orders()
+
+    assert seen[0].headers["x-xsrf-token"] == CSRF_TOKEN
+
+
+def test_write_refreshes_csrf_and_retries_once_when_spring_rejects_it(
+    client: DietlyClient, responses: dict[str, httpx.Response], seen: list[httpx.Request]
+) -> None:
+    """A rotated token must not lose the user's switch — refresh, then retry."""
+    _register_common(responses)
+    tokens: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "PUT":
+            tokens.append(request.headers.get("x-xsrf-token"))
+            if len(tokens) == 1:
+                return httpx.Response(
+                    403,
+                    json=CSRF_REJECTION_BODY,
+                    headers={"set-cookie": csrf_cookie_header("fresh")},
+                )
+            return httpx.Response(200, json=SWITCH_RESPONSE)
+        if request.url.path == "/api/auth/login":
+            # The re-prime: Spring hands out the rotated token.
+            return httpx.Response(401, headers={"set-cookie": csrf_cookie_header("fresh")})
+        key = f"{request.method} {request.url.path}"
+        assert key in responses, f"unexpected request {key}"
+        return responses[key]
+
+    client.session.http = httpx.Client(transport=httpx.MockTransport(handler))
+    client.session.http.cookies.set("XSRF-TOKEN", "stale", domain="panel.dietly.pl", path="/")
+
+    result = client.switch_meal(ORDER_ID, DELIVERY_ID, SLOT_ID, 2354, dry_run=False)
+
+    assert result.applied is True
+    assert tokens == ["stale", "fresh"]
+
+
+def test_write_gives_up_after_one_csrf_refresh(
+    client: DietlyClient, responses: dict[str, httpx.Response], seen: list[httpx.Request]
+) -> None:
+    """Two rejections in a row is a real problem, not a rotation — surface it."""
+    _register_common(responses)
+    puts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "PUT":
+            puts.append(1)
+            return httpx.Response(
+                403, json=CSRF_REJECTION_BODY, headers={"set-cookie": csrf_cookie_header("x")}
+            )
+        if request.url.path == "/api/auth/login":
+            return httpx.Response(401, headers={"set-cookie": csrf_cookie_header("x")})
+        return responses[f"{request.method} {request.url.path}"]
+
+    client.session.http = httpx.Client(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(CsrfTokenError):
+        client.switch_meal(ORDER_ID, DELIVERY_ID, SLOT_ID, 2354, dry_run=False)
+
+    assert len(puts) == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -744,7 +820,15 @@ def e2e_routes(responses: dict[str, httpx.Response]) -> dict[str, httpx.Response
         f"/delivery-meals/{SLOT_ID}/switch"
     )
     responses["POST /api/auth/login"] = httpx.Response(
-        200, headers={"set-cookie": "SESSION=abc123; Domain=dietly.pl; Path=/; HttpOnly"}
+        200,
+        headers={
+            "set-cookie": "SESSION=abc123; Domain=dietly.pl; Path=/; HttpOnly",
+        },
+    )
+    responses["GET /api/auth/login"] = httpx.Response(
+        401,
+        json={"status": 401, "error": "Unauthorized", "path": "/auth/login"},
+        headers={"set-cookie": f"XSRF-TOKEN={CSRF_TOKEN}; Path=/"},
     )
     responses["GET /api/profile"] = httpx.Response(200, json={"email": "user@example.com"})
     responses["GET /api/profile/profile-order/all"] = httpx.Response(
@@ -837,6 +921,8 @@ def test_end_to_end_login_status_orders_day_options_switch(
     assert puts[0].url.params["amount"] == "1"
     assert puts[0].headers["company-id"] == "wybormenu"
     assert "SESSION=abc123" in puts[0].headers.get("cookie", "")
+    # Spring only accepts the write when the CSRF token rides along.
+    assert puts[0].headers["x-xsrf-token"] == CSRF_TOKEN
 
 
 def test_end_to_end_expired_session_says_to_log_in(

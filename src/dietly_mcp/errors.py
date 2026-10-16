@@ -67,6 +67,16 @@ class CloudflareBlockedError(DietlyHttpError):
     """Cloudflare challenged or blocked the request (browser check / 503)."""
 
 
+class CsrfTokenError(DietlyHttpError):
+    """Spring Security rejected the request because the CSRF token was missing.
+
+    Dietly is a Spring app with a cookie-based CSRF token: the SPA reads the
+    ``XSRF-TOKEN`` cookie and echoes it in the ``X-XSRF-TOKEN`` header on every
+    state-changing call. A POST without that header gets HTTP 403 with Spring's
+    default JSON body — which is *not* a wrong password and *not* Cloudflare.
+    """
+
+
 class NetworkError(DietlyError):
     """The request never reached Dietly (DNS, TLS, timeout, proxy, ...)."""
 

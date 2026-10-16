@@ -12,6 +12,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from conftest import CSRF_REJECTION_BODY, CSRF_TOKEN, LOGIN_URL, csrf_cookie_header
 
 from dietly_mcp.config import (
     Credentials,
@@ -23,13 +24,23 @@ from dietly_mcp.config import (
 from dietly_mcp.errors import (
     CateringMismatchError,
     CloudflareBlockedError,
+    CsrfTokenError,
     InvalidCredentialsError,
     MissingCredentialsError,
     MissingSessionError,
     NetworkError,
     SessionExpiredError,
 )
-from dietly_mcp.session import Session, check_response
+from dietly_mcp.session import (
+    Session,
+    api_headers,
+    body_snippet,
+    browser_headers,
+    check_response,
+    has_csrf_cookie,
+    is_spring_csrf_rejection,
+    looks_like_cloudflare,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -133,13 +144,30 @@ def test_load_credentials_quiet_on_600_permissions(
 CREDENTIALS = Credentials(username="user@example.com", password="secret", source="test")
 
 
-def test_login_success_persists_cookie_jar_privately(
-    settings: Settings, responses: dict[str, httpx.Response], transport: httpx.MockTransport
-) -> None:
-    responses["POST /api/auth/login"] = httpx.Response(
-        200, headers={"set-cookie": "SESSION=abc123; Path=/; HttpOnly; Secure"}
-    )
+def _login_requests(seen: list[httpx.Request]) -> list[httpx.Request]:
+    """Return only the requests that hit the login endpoint."""
+    return [r for r in seen if r.url.path == "/api/auth/login"]
 
+
+def test_login_primes_csrf_then_posts_with_the_header(
+    settings: Settings, login_ok: None, seen: list[httpx.Request], transport
+) -> None:
+    """The real handshake: GET for the XSRF cookie, POST echoing it back."""
+    Session.login(CREDENTIALS, settings, transport=transport)
+
+    requests = _login_requests(seen)
+    assert [r.method for r in requests] == ["GET", "POST"]
+    post = requests[1]
+    assert post.headers["x-xsrf-token"] == CSRF_TOKEN
+    assert post.headers["origin"] == "https://panel.dietly.pl"
+    assert post.headers["referer"] == "https://panel.dietly.pl/"
+    # Spring compares the header against the cookie, so both must be present.
+    assert f"XSRF-TOKEN={CSRF_TOKEN}" in post.headers.get("cookie", "")
+
+
+def test_login_success_persists_cookie_jar_privately(
+    settings: Settings, login_ok: None, transport: httpx.MockTransport
+) -> None:
     session = Session.login(CREDENTIALS, settings, transport=transport)
 
     assert session.email == "user@example.com"
@@ -150,22 +178,21 @@ def test_login_success_persists_cookie_jar_privately(
 
     stored = json.loads(path.read_text(encoding="utf-8"))
     assert stored["email"] == "user@example.com"
-    assert stored["cookies"][0]["name"] == "SESSION"
+    names = {cookie["name"] for cookie in stored["cookies"]}
+    assert {"SESSION", "XSRF-TOKEN"} <= names
     # The password must never be written to disk.
     assert "secret" not in path.read_text(encoding="utf-8")
 
 
 def test_login_sends_form_encoded_credentials(
     settings: Settings,
-    responses: dict[str, httpx.Response],
+    login_ok: None,
     seen: list[httpx.Request],
     transport: httpx.MockTransport,
 ) -> None:
-    responses["POST /api/auth/login"] = httpx.Response(200, headers={"set-cookie": "S=1; Path=/"})
-
     Session.login(CREDENTIALS, settings, transport=transport)
 
-    request = seen[0]
+    request = _login_requests(seen)[1]
     assert request.url == httpx.URL(settings.login_url)
     assert request.headers["content-type"] == "application/x-www-form-urlencoded"
     assert request.headers["x-launcher-type"] == "BROWSER_DIETLY"
@@ -173,24 +200,90 @@ def test_login_sends_form_encoded_credentials(
     assert b"password=secret" in request.content
 
 
-def test_login_rejected_credentials_raise_clear_error(
-    settings: Settings, responses: dict[str, httpx.Response], transport: httpx.MockTransport
+def test_login_403_csrf_rejection_is_not_reported_as_bad_credentials(
+    settings: Settings,
+    prime_csrf,
+    responses: dict[str, httpx.Response],
+    transport: httpx.MockTransport,
 ) -> None:
-    responses["POST /api/auth/login"] = httpx.Response(401, json={"message": "Bad credentials"})
+    """The live failure mode: 403 + Spring JSON + a freshly rotated XSRF cookie."""
+    prime_csrf()
+    responses["POST /api/auth/login"] = httpx.Response(
+        403,
+        json=CSRF_REJECTION_BODY,
+        headers={"server": "cloudflare", "set-cookie": csrf_cookie_header("rotated")},
+    )
+
+    with pytest.raises(CsrfTokenError) as excinfo:
+        Session.login(CREDENTIALS, settings, transport=transport)
+
+    message = str(excinfo.value)
+    assert "CSRF" in message
+    assert "X-XSRF-TOKEN" in message
+    assert "Forbidden" in message  # the backend body is quoted back
+    assert not Path(settings.session_path).exists()
+
+
+def test_login_recovers_when_spring_rotates_the_csrf_token(
+    settings: Settings,
+    prime_csrf,
+    responses: dict[str, httpx.Response],
+    seen: list[httpx.Request],
+    transport: httpx.MockTransport,
+) -> None:
+    """A rotation on the first POST triggers exactly one re-prime + retry."""
+    prime_csrf("stale")
+    rejection = httpx.Response(
+        403, json=CSRF_REJECTION_BODY, headers={"set-cookie": csrf_cookie_header("fresh")}
+    )
+    success = httpx.Response(200, headers={"set-cookie": "SESSION=abc123; Path=/"})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "GET":
+            return httpx.Response(401, headers={"set-cookie": csrf_cookie_header("fresh")})
+        # First POST: rejected and rotated; second POST: accepted.
+        posts = [r for r in seen if r.method == "POST"]
+        return rejection if len(posts) == 1 else success
+
+    session = Session.login(CREDENTIALS, settings, transport=httpx.MockTransport(handler))
+
+    assert session.email == "user@example.com"
+    assert [r.method for r in seen] == ["GET", "POST", "GET", "POST"]
+    assert seen[-1].headers["x-xsrf-token"] == "fresh"
+
+
+def test_login_rejected_credentials_raise_clear_error(
+    settings: Settings,
+    prime_csrf,
+    responses: dict[str, httpx.Response],
+    transport: httpx.MockTransport,
+) -> None:
+    """Wrong password → 401 with a plain-text Polish body (observed live)."""
+    prime_csrf()
+    responses["POST /api/auth/login"] = httpx.Response(
+        401, text="Niepoprawne dane uwierzytelniające"
+    )
 
     with pytest.raises(InvalidCredentialsError) as excinfo:
         Session.login(CREDENTIALS, settings, transport=transport)
 
-    assert "DIETLY_EMAIL" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "DIETLY_EMAIL" in message
+    assert "401" in message
     assert not Path(settings.session_path).exists()
 
 
 def test_login_cloudflare_challenge_is_reported_as_such(
-    settings: Settings, responses: dict[str, httpx.Response], transport: httpx.MockTransport
+    settings: Settings,
+    prime_csrf,
+    responses: dict[str, httpx.Response],
+    transport: httpx.MockTransport,
 ) -> None:
+    prime_csrf()
     responses["POST /api/auth/login"] = httpx.Response(
         403,
-        headers={"server": "cloudflare", "cf-ray": "8f00-XXX"},
+        headers={"server": "cloudflare", "cf-ray": "8f00-XXX", "cf-mitigated": "challenge"},
         html="<html><title>Just a moment...</title></html>",
     )
 
@@ -212,6 +305,7 @@ def test_login_network_failure_is_wrapped(settings: Settings) -> None:
     assert "Could not reach" in str(excinfo.value)
 
 
+
 # --------------------------------------------------------------------------- #
 # Session persistence / validation
 # --------------------------------------------------------------------------- #
@@ -224,13 +318,11 @@ def test_load_without_session_file_asks_for_login(settings: Settings) -> None:
 
 def test_load_sends_persisted_cookie(
     settings: Settings,
+    login_ok: None,
     responses: dict[str, httpx.Response],
     seen: list[httpx.Request],
     transport: httpx.MockTransport,
 ) -> None:
-    responses["POST /api/auth/login"] = httpx.Response(
-        200, headers={"set-cookie": "SESSION=abc123; Path=/; HttpOnly"}
-    )
     Session.login(CREDENTIALS, settings, transport=transport)
     seen.clear()
 
@@ -244,6 +336,8 @@ def test_load_sends_persisted_cookie(
     assert seen[0].headers["accept"] == "application/json"
     assert seen[0].headers["x-launcher-type"] == "BROWSER_DIETLY"
     assert seen[0].headers["accept-language"] == "pl-PL,pl;q=0.9"
+    # The CSRF cookie came back from the saved jar and is echoed on reads too.
+    assert seen[0].headers["x-xsrf-token"] == CSRF_TOKEN
 
 
 def test_verify_expired_session(
@@ -308,7 +402,7 @@ def test_corrupt_session_file_is_reported(
 # Status-code mapping
 # --------------------------------------------------------------------------- #
 def _response(status: int, **kwargs: object) -> httpx.Response:
-    request = httpx.Request("GET", "https://dietly.pl/api/company/customer/order/1")
+    request = httpx.Request("GET", "https://panel.dietly.pl/api/company/customer/order/1")
     return httpx.Response(status, request=request, **kwargs)  # type: ignore[arg-type]
 
 
@@ -333,6 +427,172 @@ def test_check_response_passes_through_success() -> None:
     check_response(_response(200, json={"ok": True}))
 
 
+def test_403_with_spring_json_is_not_treated_as_cloudflare() -> None:
+    """Regression: every live response carries ``server: cloudflare``.
+
+    Only ``cf-mitigated`` or an HTML interstitial may be read as a challenge.
+    """
+    response = _response(
+        403, headers={"server": "cloudflare", "cf-ray": "a4b7-waw"}, json=CSRF_REJECTION_BODY
+    )
+
+    assert looks_like_cloudflare(response) is False
+    assert has_csrf_cookie(response) is False
+
+
+def test_looks_like_cloudflare_needs_a_real_challenge_marker() -> None:
+    mitigated = _response(403, headers={"cf-mitigated": "challenge"}, json={})
+    interstitial = _response(403, headers={}, html="<html>Just a moment…</html>")
+    plain_json = _response(403, headers={"server": "cloudflare"}, json=CSRF_REJECTION_BODY)
+
+    assert looks_like_cloudflare(mitigated) is True
+    assert looks_like_cloudflare(interstitial) is True
+    assert looks_like_cloudflare(plain_json) is False
+
+
+def test_check_response_403_with_rotated_csrf_cookie_is_a_csrf_error() -> None:
+    response = _response(
+        403, json=CSRF_REJECTION_BODY, headers={"set-cookie": csrf_cookie_header("rotated")}
+    )
+
+    assert is_spring_csrf_rejection(response) is True
+
+    with pytest.raises(CsrfTokenError) as excinfo:
+        check_response(response)
+
+    assert "CSRF" in str(excinfo.value)
+    assert "/auth/login" in str(excinfo.value)
+
+
+def test_check_response_app_level_403_is_a_session_problem_with_the_backend_body() -> None:
+    response = _response(403, json={"detail": "You don't have permission"})
+
+    with pytest.raises(SessionExpiredError) as excinfo:
+        check_response(response)
+
+    assert "dietly-mcp login" in str(excinfo.value)
+    assert "You don't have permission" in str(excinfo.value)
+
+
+def test_check_response_401_says_not_logged_in() -> None:
+    with pytest.raises(SessionExpiredError) as excinfo:
+        check_response(_response(401, json={"status": 401, "error": "Unauthorized"}))
+
+    assert "not logged in" in str(excinfo.value)
+
+
+def test_body_snippet_is_single_line_and_bounded() -> None:
+    response = _response(400, text="line one\nline two   spaced")
+
+    snippet = body_snippet(response, limit=10)
+    assert snippet == "line one l"
+    assert body_snippet(_response(204, text="")) == ""
+
+
+# --------------------------------------------------------------------------- #
+# Headers
+# --------------------------------------------------------------------------- #
+def test_api_headers_add_company_and_csrf_only_when_given(settings: Settings) -> None:
+    bare = api_headers(settings)
+    assert "company-id" not in bare
+    assert "x-xsrf-token" not in bare
+
+    full = api_headers(settings, "wybormenu", csrf_token=CSRF_TOKEN)
+    assert full["company-id"] == "wybormenu"
+    assert full["x-xsrf-token"] == CSRF_TOKEN
+
+
+def test_browser_headers_derive_origin_from_the_login_url(settings: Settings) -> None:
+    headers = browser_headers(settings, LOGIN_URL, csrf_token=CSRF_TOKEN)
+
+    assert headers["origin"] == "https://panel.dietly.pl"
+    assert headers["referer"] == "https://panel.dietly.pl/"
+    assert headers["x-xsrf-token"] == CSRF_TOKEN
+
+
+def test_session_csrf_token_reads_the_cookie_jar(settings: Settings, transport) -> None:
+    session = Session(Session._new_client(settings, transport=transport), settings)
+    assert session.csrf_token() is None
+
+    session.http.cookies.set("XSRF-TOKEN", CSRF_TOKEN, domain="panel.dietly.pl", path="/")
+    assert session.csrf_token() == CSRF_TOKEN
+
+
+# --------------------------------------------------------------------------- #
+# Transport: IPv4 pinning, timeouts, retries
+# --------------------------------------------------------------------------- #
+def test_new_client_pins_ipv4_and_sets_explicit_timeouts(settings: Settings) -> None:
+    client = Session._new_client(settings)
+    try:
+        assert client.timeout.connect == settings.connect_timeout
+        assert client.timeout.read == settings.timeout
+        assert client.follow_redirects is True
+        # httpx keeps the bound local address on its connection pool.
+        assert client._transport._pool._local_address == "0.0.0.0"  # noqa: SLF001
+    finally:
+        client.close()
+
+
+def test_new_client_can_opt_out_of_ipv4_pinning(settings: Settings) -> None:
+    from dataclasses import replace
+
+    client = Session._new_client(replace(settings, ipv4_only=False))
+    try:
+        assert client._transport._pool._local_address is None  # noqa: SLF001
+    finally:
+        client.close()
+
+
+def test_send_with_retries_recovers_from_a_transient_error() -> None:
+    from dietly_mcp.http import send_with_retries
+
+    attempts: list[int] = []
+    slept: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise httpx.ReadTimeout("slow", request=request)
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        response = send_with_retries(
+            client, "GET", "https://panel.dietly.pl/api/profile",
+            retries=2, sleeper=slept.append,
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 200
+    assert len(attempts) == 2
+    assert slept == [0.4]  # one backoff before the successful retry
+
+
+def test_send_with_retries_gives_up_and_reraises() -> None:
+    from dietly_mcp.http import send_with_retries
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("nope", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(httpx.ConnectError):
+            send_with_retries(
+                client, "GET", "https://panel.dietly.pl/api/profile",
+                retries=1, sleeper=lambda _seconds: None,
+            )
+    finally:
+        client.close()
+
+
+def test_build_transport_ipv4_pinning_is_toggleable() -> None:
+    from dietly_mcp.http import build_transport
+
+    assert build_transport()._pool._local_address == "0.0.0.0"  # noqa: SLF001
+    assert build_transport(ipv4_only=False)._pool._local_address is None  # noqa: SLF001
+
+
 def test_settings_timeout_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     from dietly_mcp.config import load_settings
 
@@ -342,6 +602,29 @@ def test_settings_timeout_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert settings.timeout == 12.5
     assert settings.company_id == "innykatering"
+
+
+def test_settings_transport_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    from dietly_mcp.config import load_settings
+
+    monkeypatch.setenv("DIETLY_CONNECT_TIMEOUT", "3.5")
+    monkeypatch.setenv("DIETLY_RETRIES", "5")
+    monkeypatch.setenv("DIETLY_IPV4_ONLY", "no")
+    settings = load_settings()
+
+    assert settings.connect_timeout == 3.5
+    assert settings.retries == 5
+    assert settings.ipv4_only is False
+
+
+def test_settings_defaults_target_the_panel_host() -> None:
+    from dietly_mcp.config import Settings as FreshSettings
+
+    settings = FreshSettings()
+    assert settings.base_url == "https://panel.dietly.pl"
+    assert settings.login_url.startswith(settings.base_url)
+    assert settings.ipv4_only is True
+    assert settings.retries == 2
 
 
 def test_default_paths_use_xdg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -367,9 +650,8 @@ def test_credentials_source_is_preserved_and_never_a_secret() -> None:
 
 
 def test_no_password_in_session_file_permissions_check(
-    settings: Settings, responses: dict[str, httpx.Response], transport: httpx.MockTransport
+    settings: Settings, login_ok: None, transport: httpx.MockTransport
 ) -> None:
-    responses["POST /api/auth/login"] = httpx.Response(200, headers={"set-cookie": "S=1; Path=/"})
     Session.login(CREDENTIALS, settings, transport=transport)
     mode = stat.S_IMODE(os.stat(settings.session_path).st_mode)
     assert mode == 0o600

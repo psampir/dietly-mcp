@@ -207,7 +207,11 @@ def _print_switch_plan(result: SwitchResult, url: str, *, slot: str, day: str) -
 # --------------------------------------------------------------------------- #
 @app.command()
 def login() -> None:
-    """Log in to Dietly and persist the session cookie."""
+    """Log in to Dietly and persist the session cookie.
+
+    Does the full browser handshake: fetch the CSRF cookie (GET), then POST the
+    credentials with the ``X-XSRF-TOKEN`` header.
+    """
     settings = load_settings()
     credentials = load_credentials(settings.credentials_path)
     session = Session.login(credentials, settings)

@@ -14,6 +14,24 @@ is based on the reverse-engineering notes published in:
 paraphrased into [`docs/api-notes.md`](docs/api-notes.md) and re-implemented from scratch in this
 repository. All Python code here is original to `dietly-mcp`.
 
+> **Note (2026-10-16):** those notes (dated 2026-06-10) are now **incomplete** — they describe a
+> single `POST /api/auth/login` with no CSRF step. The live panel currently requires a Spring
+> Security CSRF token (`XSRF-TOKEN` cookie → `X-XSRF-TOKEN` header), verified against the live SPA
+> bundle. See the "Auth" section of [`docs/api-notes.md`](docs/api-notes.md); that part is our own
+> observation, not derived from the notes above.
+
+## dietlownik (mobile API — reference only)
+
+- **Project:** [dawidlinek/dietlownik](https://github.com/dawidlinek/dietlownik)
+- **File consulted:** [`API.md`](https://github.com/dawidlinek/dietlownik/blob/main/API.md)
+- **License:** none declared.
+
+Consulted only to rule out an alternative auth path. It documents the **mobile** API
+(`https://aplikacja.dietly.pl/api/mobile/open/...`), whose catalog endpoints are **anonymous**
+(no cookies/JWT) and therefore offer no login route for this project. **No code and no content was
+copied**; the endpoint list was not reproduced here. `dietly-mcp` uses the panel's cookie session
+exclusively.
+
 MIT notice of the referenced project (for attribution purposes):
 
 ```

@@ -25,13 +25,17 @@ from .errors import MissingCredentialsError
 APP_NAME = "dietly-mcp"
 ENV_PREFIX = "DIETLY_"
 
-DEFAULT_BASE_URL = "https://dietly.pl"
+DEFAULT_BASE_URL = "https://panel.dietly.pl"
 DEFAULT_LOGIN_URL = "https://panel.dietly.pl/api/auth/login"
 DEFAULT_COMPANY_ID = "wybormenu"
 DEFAULT_ACCEPT_LANGUAGE = "pl-PL,pl;q=0.9,en;q=0.8"
 # Believable recent Firefox on Linux — the site sits behind Cloudflare.
 DEFAULT_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64; rv:141.0) Gecko/20100101 Firefox/141.0"
 DEFAULT_TIMEOUT = 30.0
+#: Bound on dialing: a dead (IPv6) route should fail fast, not wait for the body.
+DEFAULT_CONNECT_TIMEOUT = 10.0
+#: Extra attempts after a transient connect/read error.
+DEFAULT_RETRIES = 2
 
 CREDENTIALS_FILENAME = "credentials.env"
 
@@ -236,18 +240,39 @@ class Settings:
     user_agent: str = DEFAULT_USER_AGENT
     accept_language: str = DEFAULT_ACCEPT_LANGUAGE
     timeout: float = DEFAULT_TIMEOUT
+    connect_timeout: float = DEFAULT_CONNECT_TIMEOUT
+    retries: int = DEFAULT_RETRIES
+    ipv4_only: bool = True
     credentials_path: Path = field(default_factory=default_credentials_path)
     session_path: Path = field(default_factory=default_session_path)
+
+
+def _as_bool(raw: str | None, default: bool) -> bool:
+    """Parse a truthy/falsy environment string (``0``/``false``/``no`` are false)."""
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _as_float(raw: str | None, default: float) -> float:
+    """Parse a float environment string, falling back to ``default``."""
+    try:
+        return float(raw) if raw else default
+    except ValueError:
+        return default
+
+
+def _as_int(raw: str | None, default: int) -> int:
+    """Parse an int environment string, falling back to ``default``."""
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
 
 
 def load_settings() -> Settings:
     """Build :class:`Settings` from ``DIETLY_*`` environment variables."""
     env = os.environ
-    timeout_raw = env.get(ENV_PREFIX + "TIMEOUT")
-    try:
-        timeout = float(timeout_raw) if timeout_raw else DEFAULT_TIMEOUT
-    except ValueError:
-        timeout = DEFAULT_TIMEOUT
 
     return Settings(
         base_url=env.get(ENV_PREFIX + "BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
@@ -255,7 +280,12 @@ def load_settings() -> Settings:
         company_id=env.get(ENV_PREFIX + "COMPANY_ID", DEFAULT_COMPANY_ID),
         user_agent=env.get(ENV_PREFIX + "USER_AGENT", DEFAULT_USER_AGENT),
         accept_language=env.get(ENV_PREFIX + "ACCEPT_LANGUAGE", DEFAULT_ACCEPT_LANGUAGE),
-        timeout=timeout,
+        timeout=_as_float(env.get(ENV_PREFIX + "TIMEOUT"), DEFAULT_TIMEOUT),
+        connect_timeout=_as_float(
+            env.get(ENV_PREFIX + "CONNECT_TIMEOUT"), DEFAULT_CONNECT_TIMEOUT
+        ),
+        retries=max(0, _as_int(env.get(ENV_PREFIX + "RETRIES"), DEFAULT_RETRIES)),
+        ipv4_only=_as_bool(env.get(ENV_PREFIX + "IPV4_ONLY"), True),
         credentials_path=Path(
             env.get(ENV_PREFIX + "CREDENTIALS_FILE", str(default_credentials_path()))
         ).expanduser(),
