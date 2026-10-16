@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "dietly-mcp"
 version = "0.1.0"
-description = "Unofficial Dietly (dietly.pl) API client, debug CLI and read-only MCP server."
+description = "Unofficial Dietly (dietly.pl) API client, debug CLI and MCP server (read tools + audited write tools)."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }

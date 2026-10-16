@@ -1,8 +1,10 @@
 """dietly-mcp — unofficial Dietly (dietly.pl) API client, CLI and MCP server.
 
-Phase 2 (F2) ships the read-only MCP server (``dietly_mcp.mcp_server``) alongside
-the API client and debug CLI. Meal switching stays CLI-only; write tools are
-planned for phase 3.
+Phase 3 (F3) adds the **write** half: the MCP tools ``dietly_switch``,
+``dietly_apply`` and ``dietly_revert`` plus their CLI counterparts, all sharing the
+:mod:`dietly_mcp.operations` policy (dry run by default, target must be offered,
+every attempt audited, reverts audited too). The read-only tools from phase 2 are
+unchanged.
 """
 
 from __future__ import annotations

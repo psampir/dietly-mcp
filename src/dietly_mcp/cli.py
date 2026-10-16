@@ -5,8 +5,11 @@ machine-readable output. Expected errors (bad credentials, expired session,
 HTTP 490, Cloudflare, network) print a single clean message instead of a
 traceback.
 
-The only write command is ``switch``, which is a dry run unless ``--apply``
-is given.
+The write commands are ``switch`` (a dry run unless ``--apply`` is given) and
+``revert`` (applies by default, ``--dry-run`` to preview); ``audit`` lists the
+append-only log they maintain. ``switch`` and ``revert`` call the same
+:mod:`dietly_mcp.operations` functions as the MCP write tools, so the guardrail,
+the dry-run semantics and the audit records cannot drift between front ends.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from typing import Any
 import typer
 
 from . import __version__
+from .audit import default_audit_log
 from .client import DietlyClient, resolve_delivery, resolve_slot
 from .config import Settings, load_credentials, load_settings
 from .errors import DietlyError
@@ -30,7 +34,8 @@ from .logic import (
     parse_date,
     sort_deliveries,
 )
-from .models import DayMeal, Delivery, Order, SwitchResult
+from .models import DayMeal, Delivery, Order
+from .operations import revert_operation, switch_operation
 from .session import Session
 
 app = typer.Typer(
@@ -176,24 +181,60 @@ def _resolve_day(client: DietlyClient, order: Order, day: str) -> tuple[Delivery
     return delivery, meals
 
 
-def _print_switch_plan(result: SwitchResult, url: str, *, slot: str, day: str) -> None:
-    """Explain a dry-run switch."""
+def _kcal_text(value: Any) -> str:
+    """Format a kcal figure for the human-readable plan (``544.0`` → ``544``)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "-" if value is None else str(value)
+    return f"{value:g}"
+
+
+def _print_switch_plan(payload: dict[str, Any]) -> None:
+    """Explain a dry-run switch from the operations payload."""
+    from_ref = payload.get("from") or {}
+    to_ref = payload.get("to") or {}
+    variant = f", option {to_ref['variant']}" if to_ref.get("variant") else ""
     lines = [
         "DRY RUN — nothing was sent to Dietly.",
-        f"  Order:   {result.order_id}",
-        f"  Date:    {day}",
-        f"  Slot:    {result.slot or slot} (slot id {result.delivery_meal_id})",
-        f"  From:    {result.previous_menu_meal_name or '?'}"
-        f" (meal id {result.previous_diet_calories_meal_id})",
-        f"  To:      {result.target_menu_meal_name or '?'}"
-        f" (meal id {result.diet_calories_meal_id}"
-        + (f", option {result.target_diet_option_name}" if result.target_diet_option_name else "")
-        + ")",
-        f"  Request: PUT {url}",
+        f"  Order:   {payload.get('orderId')}",
+        f"  Date:    {payload.get('date')}",
+        f"  Slot:    {payload.get('slot')} (slot id {payload.get('deliveryMealId')})",
+        f"  From:    {from_ref.get('name') or '?'} "
+        f"(meal id {from_ref.get('id')}, {_kcal_text(from_ref.get('kcal'))} kcal)",
+        f"  To:      {to_ref.get('name') or '?'} "
+        f"(meal id {to_ref.get('id')}, {_kcal_text(to_ref.get('kcal'))} kcal{variant})",
+        f"  Request: PUT {(payload.get('request') or {}).get('url')}",
         "",
         "Re-run with --apply to perform this switch.",
     ]
     typer.echo("\n".join(lines))
+
+
+def _switch_plan_json(payload: dict[str, Any]) -> dict[str, Any]:
+    """The machine-readable dry-run plan (kept stable for existing consumers)."""
+    from_ref = payload.get("from") or {}
+    to_ref = payload.get("to") or {}
+    return {
+        "dryRun": True,
+        "applied": False,
+        "auditId": payload.get("auditId"),
+        "orderId": payload.get("orderId"),
+        "date": payload.get("date"),
+        "slot": payload.get("slot"),
+        "deliveryId": payload.get("deliveryId"),
+        "deliveryMealId": payload.get("deliveryMealId"),
+        "from": {
+            "dietCaloriesMealId": from_ref.get("id"),
+            "menuMealName": from_ref.get("name"),
+            "kcal": from_ref.get("kcal"),
+        },
+        "to": {
+            "dietCaloriesMealId": to_ref.get("id"),
+            "menuMealName": to_ref.get("name"),
+            "dietOptionName": to_ref.get("variant"),
+            "kcal": to_ref.get("kcal"),
+        },
+        "request": payload.get("request"),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -475,67 +516,155 @@ def switch(
     json_output: bool = JSON_OPTION,
 ) -> None:
     """Switch one slot to another meal — DRY RUN unless --apply is given."""
-    client, _ = _client()
-    current = _select_orders(client, order)[0]
+    client, settings = _client()
     iso_date = _parse_date(date)
-    delivery, meals = _resolve_day(client, current, iso_date)
-    day_meal = resolve_slot(meals, slot)
-
-    result = client.switch_meal(
-        current.order_id,  # type: ignore[arg-type]
-        delivery.delivery_id,  # type: ignore[arg-type]
-        day_meal.delivery_meal_id,  # type: ignore[arg-type]
-        to,
-        amount=amount,
+    payload = switch_operation(
+        client,
+        date=iso_date,
+        slot=slot,
+        to_id=to,
+        order_id=order,
         dry_run=not apply,
+        amount=amount,
+        tool="switch",
+        audit=default_audit_log(settings),
     )
-    url = client.switch_meal_url(
-        current.order_id,  # type: ignore[arg-type]
-        delivery.delivery_id,  # type: ignore[arg-type]
-        day_meal.delivery_meal_id,  # type: ignore[arg-type]
-        to,
-        amount,
-    )
+    if not payload.get("ok"):
+        raise DietlyError(payload.get("error") or "The switch failed.")
 
     if not apply:
         if json_output:
-            _dump_json(
-                {
-                    "dryRun": True,
-                    "applied": False,
-                    "orderId": result.order_id,
-                    "date": iso_date,
-                    "slot": result.slot or day_meal.meal_name,
-                    "deliveryId": delivery.delivery_id,
-                    "deliveryMealId": result.delivery_meal_id,
-                    "from": {
-                        "dietCaloriesMealId": result.previous_diet_calories_meal_id,
-                        "menuMealName": result.previous_menu_meal_name,
-                    },
-                    "to": {
-                        "dietCaloriesMealId": result.diet_calories_meal_id,
-                        "menuMealName": result.target_menu_meal_name,
-                        "dietOptionName": result.target_diet_option_name,
-                    },
-                    "request": {"method": "PUT", "url": url},
-                }
-            )
+            _dump_json(_switch_plan_json(payload))
             return
-        _print_switch_plan(result, url, slot=slot, day=iso_date)
+        _print_switch_plan(payload)
         return
 
     if json_output:
-        payload = _dump_model(result)
-        payload["date"] = iso_date
+        out: dict[str, Any] = dict(payload.get("result") or {})
+        out["date"] = payload.get("date")
+        out["applied"] = True
+        out["auditId"] = payload.get("auditId")
+        _dump_json(out)
+        return
+
+    from_ref = payload.get("from") or {}
+    to_ref = payload.get("to") or {}
+    suffix = f" [audit {payload['auditId']}]" if payload.get("auditId") else ""
+    typer.echo(
+        f"Switched {payload.get('slot')} on {payload.get('date')}: "
+        f"{from_ref.get('id')} ({from_ref.get('name') or '?'}) → "
+        f"{to_ref.get('id')} ({to_ref.get('name') or '?'}).{suffix}"
+    )
+
+
+@app.command()
+def revert(
+    audit_id: str = typer.Option(
+        None,
+        "--audit-id",
+        help="Audit entry id to revert (default: the most recent applied switch).",
+    ),
+    date: str = typer.Option(
+        None,
+        "--date",
+        help="Only revert a switch on this date (YYYY-MM-DD / today / tomorrow).",
+    ),
+    slot: str = typer.Option(
+        None, "--slot", help="Only revert a switch of this slot (e.g. Kolacja)."
+    ),
+    order: int = ORDER_OPTION,
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Preview the revert without sending anything."
+    ),
+    json_output: bool = JSON_OPTION,
+) -> None:
+    """Undo a recorded switch — a REAL write (use --dry-run to preview).
+
+    Without ``--audit-id`` the most recent applied switch from the audit log is
+    reverted, optionally narrowed with ``--date``/``--slot``. The revert is
+    refused when the recorded dish is no longer offered or the day looks locked.
+    """
+    client, settings = _client()
+    payload = revert_operation(
+        client,
+        audit_id=audit_id or None,
+        date=date or None,
+        slot=slot or None,
+        order_id=order,
+        dry_run=dry_run,
+        tool="revert",
+        audit=default_audit_log(settings),
+    )
+    if not payload.get("ok"):
+        raise DietlyError(payload.get("error") or "The revert failed.")
+
+    if json_output:
         _dump_json(payload)
         return
 
-    typer.echo(
-        f"Switched {result.slot or slot} on {iso_date}: "
-        f"{result.previous_diet_calories_meal_id} ({result.previous_menu_meal_name or '?'}) → "
-        f"{result.diet_calories_meal_id} ({result.target_menu_meal_name or '?'})."
-        + (f" [seen={result.seen}]" if result.seen else "")
+    from_ref = payload.get("from") or {}
+    to_ref = payload.get("to") or {}
+    lines = []
+    if dry_run:
+        lines.append("DRY RUN — nothing was sent to Dietly.")
+    lines.append(
+        f"{'Would revert' if dry_run else 'Reverted'} {payload.get('slot')} "
+        f"on {payload.get('date')}: {from_ref.get('id')} "
+        f"({from_ref.get('name') or '?'}) → {to_ref.get('id')} "
+        f"({to_ref.get('name') or '?'})."
     )
+    lines.append(f"  Undid switch: audit {payload.get('revertedAuditId')}")
+    if payload.get("auditId"):
+        lines.append(f"  Revert audit: {payload['auditId']}")
+    typer.echo("\n".join(lines))
+
+
+def _audit_ref(ref: Any) -> str:
+    """Render an audit ``from``/``to`` selection compactly."""
+    if not isinstance(ref, dict) or ref.get("id") is None:
+        return "-"
+    return f"{ref.get('id')} {ref.get('name') or '?'}"
+
+
+@app.command()
+def audit(
+    limit: int = typer.Option(
+        20, "--limit", "-n", help="Show at most this many of the most recent entries."
+    ),
+    json_output: bool = JSON_OPTION,
+) -> None:
+    """Show the write audit log (append-only JSONL; newest shown last)."""
+    settings = load_settings()
+    entries = default_audit_log(settings).entries(limit=limit)
+
+    if json_output:
+        _dump_json(entries)
+        return
+    if not entries:
+        typer.echo(f"No audit entries yet ({settings.audit_path}).")
+        return
+
+    rows = [
+        [
+            str(entry.get("timestamp") or "")[:19],
+            entry.get("event"),
+            entry.get("result"),
+            _yes_no(bool(entry.get("dry_run"))),
+            entry.get("date"),
+            entry.get("slot"),
+            f"{_audit_ref(entry.get('from'))} → {_audit_ref(entry.get('to'))}",
+            entry.get("tool"),
+            str(entry.get("id") or "")[:8],
+        ]
+        for entry in entries
+    ]
+    typer.echo(
+        _table(
+            ["TIME (UTC)", "EVENT", "RESULT", "DRY", "DATE", "SLOT", "FROM → TO", "TOOL", "ID"],
+            rows,
+        )
+    )
+    typer.echo(f"\n{len(entries)} entr(y/ies) from {settings.audit_path}")
 
 
 @app.command()

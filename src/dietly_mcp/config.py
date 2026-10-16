@@ -5,7 +5,8 @@ Secrets live *outside* the repository:
 * credentials: ``~/.config/dietly-mcp/credentials.env`` (``KEY=VALUE`` lines,
   parsed — never shell-sourced) with ``DIETLY_*`` environment variables as a
   fallback;
-* session cookie jar: ``~/.local/state/dietly-mcp/session.json``.
+* session cookie jar: ``~/.local/state/dietly-mcp/session.json``;
+* append-only write audit log: ``~/.local/state/dietly-mcp/audit.jsonl``.
 
 This module never prints secret values. It only warns about weak file
 permissions.
@@ -39,6 +40,7 @@ DEFAULT_CONNECT_TIMEOUT = 10.0
 DEFAULT_RETRIES = 2
 
 CREDENTIALS_FILENAME = "credentials.env"
+AUDIT_FILENAME = "audit.jsonl"
 
 #: Paths already warned about, so the warning is printed only once per process.
 _WARNED_PERMISSIONS: set[Path] = set()
@@ -69,6 +71,11 @@ def default_credentials_path() -> Path:
 def default_session_path() -> Path:
     """Return the default session cookie jar path."""
     return state_dir() / "session.json"
+
+
+def default_audit_path() -> Path:
+    """Return the default write-audit JSONL path."""
+    return state_dir() / AUDIT_FILENAME
 
 
 def ensure_private_dir(path: Path) -> Path:
@@ -249,6 +256,8 @@ class Settings:
     edit_cutoff_hours: float = DEFAULT_EDIT_CUTOFF_HOURS
     credentials_path: Path = field(default_factory=default_credentials_path)
     session_path: Path = field(default_factory=default_session_path)
+    #: Append-only audit log for writes (``DIETLY_AUDIT_FILE``).
+    audit_path: Path = field(default_factory=default_audit_path)
 
 
 def _as_bool(raw: str | None, default: bool) -> bool:
@@ -298,5 +307,8 @@ def load_settings() -> Settings:
         ).expanduser(),
         session_path=Path(
             env.get(ENV_PREFIX + "SESSION_FILE", str(default_session_path()))
+        ).expanduser(),
+        audit_path=Path(
+            env.get(ENV_PREFIX + "AUDIT_FILE", str(default_audit_path()))
         ).expanduser(),
     )

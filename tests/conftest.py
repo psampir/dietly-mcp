@@ -47,6 +47,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "DIETLY_PASSWORD",
         "DIETLY_CREDENTIALS_FILE",
         "DIETLY_SESSION_FILE",
+        "DIETLY_AUDIT_FILE",
         "DIETLY_BASE_URL",
         "DIETLY_LOGIN_URL",
         "DIETLY_COMPANY_ID",
@@ -83,6 +84,7 @@ def settings(tmp_path: Path) -> Settings:
         retries=0,
         credentials_path=tmp_path / "config" / "credentials.env",
         session_path=tmp_path / "state" / "session.json",
+        audit_path=tmp_path / "state" / "audit.jsonl",
     )
 
 

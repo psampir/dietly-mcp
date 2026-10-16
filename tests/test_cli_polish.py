@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json as jsonlib
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -145,11 +146,16 @@ class CliFake:
 
 
 @pytest.fixture
-def install(monkeypatch: pytest.MonkeyPatch):
-    """Return a factory that installs a ``CliFake`` into the CLI."""
+def install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Return a factory that installs a ``CliFake`` into the CLI.
+
+    The default settings keep the audit log under ``tmp_path``, so write
+    commands never touch the real state directory.
+    """
 
     def _install(fake: CliFake, settings: Settings | None = None) -> CliFake:
-        monkeypatch.setattr(cli, "_client", lambda: (fake, settings or Settings()))
+        resolved = settings or Settings(audit_path=tmp_path / "audit.jsonl")
+        monkeypatch.setattr(cli, "_client", lambda: (fake, resolved))
         return fake
 
     return _install

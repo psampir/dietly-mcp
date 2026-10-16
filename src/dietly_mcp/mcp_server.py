@@ -1,16 +1,26 @@
-"""Read-only MCP server for Dietly, built on the official Python MCP SDK.
+"""MCP server for Dietly, built on the official Python MCP SDK.
 
-The server exposes the *inspection* half of :class:`dietly_mcp.client.DietlyClient`
-over MCP stdio: session/order status, upcoming delivery days, the meals chosen
-for one day and the alternatives offered for one slot. It deliberately exposes
-**no write tool** — switching a meal is left to the CLI (``dietly-mcp switch``)
-and a later phase.
+The server exposes two halves of :class:`dietly_mcp.client.DietlyClient` over MCP
+stdio:
+
+* **read tools** — session/order status, upcoming delivery days, the meals chosen
+  for one day and the alternatives offered for one slot;
+* **write tools** — ``dietly_switch``, ``dietly_apply`` and ``dietly_revert``,
+  which change the user's **real** Dietly order.
+
+Every write tool is **dry-run by default** and only touches the account when it
+is called with an explicit ``dry_run=False``; each attempt (dry run, apply or
+revert, success or failure) is appended to the JSONL audit log
+(``~/.local/state/dietly-mcp/audit.jsonl``, ``DIETLY_AUDIT_FILE``) described in
+:mod:`dietly_mcp.audit`. The shared implementation lives in
+:mod:`dietly_mcp.operations`, which the CLI uses too, so behaviour cannot drift.
 
 The tools return compact JSON-serialisable dicts. Every failure that this
 package can describe (expired session, rotated CSRF token, catering mismatch,
-network problem, wrong date/slot) becomes an ``{"ok": false, "error", "hint"}``
-object instead of a traceback, so an LLM client always gets something it can
-act on. Secrets are never included in any response.
+network problem, wrong date/slot, a target that was not offered) becomes an
+``{"ok": false, "error", "hint"}`` object instead of a traceback, so an LLM
+client always gets something it can act on. Secrets are never included in any
+response.
 
 SDK note: ``mcp`` 2.x renamed ``FastMCP`` to ``MCPServer``
 (``from mcp.server.mcpserver import MCPServer``); the import below falls back to
@@ -29,18 +39,7 @@ except ImportError:  # pragma: no cover - only hit with mcp < 2
 
 from .client import DietlyClient, resolve_delivery, resolve_slot
 from .config import Settings, load_credentials, load_settings
-from .errors import (
-    CateringMismatchError,
-    CloudflareBlockedError,
-    CsrfTokenError,
-    DietlyError,
-    InvalidCredentialsError,
-    MissingCredentialsError,
-    MissingSessionError,
-    NetworkError,
-    NotFoundError,
-    SessionExpiredError,
-)
+from .errors import DietlyError, MissingSessionError, SessionExpiredError
 from .logic import (
     allergen_labels,
     current_orders,
@@ -50,7 +49,23 @@ from .logic import (
     today_iso,
     upcoming_deliveries,
 )
-from .models import Order
+from .operations import (
+    apply_operation,
+    revert_operation,
+    switch_operation,
+)
+from .operations import (
+    compact as _compact,
+)
+from .operations import (
+    failure_payload as _failure,
+)
+from .operations import (
+    order_summary as _order_summary,
+)
+from .operations import (
+    resolve_order as _resolve_order,
+)
 from .session import Session
 
 __all__ = [
@@ -63,15 +78,23 @@ __all__ = [
     "status_payload",
 ]
 
-_READ_ONLY_INSTRUCTIONS = (
-    "Read-only tools for a Dietly (dietly.pl) account: session and active-order "
-    "status, upcoming delivery days, the meals chosen for one day, and the "
-    "alternatives offered for a single slot. All tools are read-only and never "
-    "modify the account. Polish meal and slot names (e.g. \"Obiad\") are returned "
-    "verbatim — never translated. Call dietly_status first to check the session."
+_INSTRUCTIONS = (
+    "Tools for a Dietly (dietly.pl) account. Read tools report session and "
+    "active-order status, upcoming delivery days, the meals chosen for one day, "
+    "and the alternatives offered for a single slot. The write tools "
+    "(dietly_switch, dietly_apply, dietly_revert) MODIFY THE USER'S REAL ORDER: "
+    "they are dry-run by default and only write when called with "
+    "dry_run=False. Always call a write tool with the default dry_run=True "
+    "first, show the returned preview (current dish → target dish, ids, kcal, "
+    "order/date/slot) to the user, and get explicit approval before repeating the "
+    "call with dry_run=False. Every attempt is recorded in the audit log and can "
+    "be undone with dietly_revert. The per-day edit cutoff is a heuristic and "
+    "Dietly may still reject a write. Polish meal and slot names (e.g. \"Obiad\") "
+    "are returned verbatim — never translated. Call dietly_status first to check "
+    "the session."
 )
 
-server = _MCPServerType("dietly", instructions=_READ_ONLY_INSTRUCTIONS)
+server = _MCPServerType("dietly", instructions=_INSTRUCTIONS)
 
 
 # --------------------------------------------------------------------------- #
@@ -141,104 +164,8 @@ def _run(build: Any) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# Error mapping
-# --------------------------------------------------------------------------- #
-def _failure(exc: Exception) -> dict[str, Any]:
-    """Turn an exception into a compact, actionable result (never a traceback)."""
-    if isinstance(exc, ValueError):
-        return {
-            "ok": False,
-            "error": f"Invalid date argument: {exc}.",
-            "hint": "Pass YYYY-MM-DD, or the words 'today' or 'tomorrow'.",
-        }
-    if isinstance(exc, MissingCredentialsError):
-        return {
-            "ok": False,
-            "error": str(exc),
-            "hint": "Create ~/.config/dietly-mcp/credentials.env (see the message) "
-            "or export DIETLY_EMAIL / DIETLY_PASSWORD.",
-        }
-    if isinstance(exc, InvalidCredentialsError):
-        return {
-            "ok": False,
-            "error": str(exc),
-            "hint": "Login was refused: check ~/.config/dietly-mcp/credentials.env.",
-        }
-    if isinstance(exc, (MissingSessionError, SessionExpiredError)):
-        return {
-            "ok": False,
-            "error": str(exc),
-            "hint": "Run `dietly-mcp login` to (re)create the session, then retry.",
-        }
-    if isinstance(exc, CsrfTokenError):
-        return {
-            "ok": False,
-            "error": str(exc),
-            "hint": "Dietly rotated its CSRF token. Retry once; if it persists, "
-            "run `dietly-mcp login`.",
-        }
-    if isinstance(exc, CateringMismatchError):
-        return {
-            "ok": False,
-            "error": str(exc),
-            "hint": "Wrong order/catering. Re-check the order id with dietly_orders.",
-        }
-    if isinstance(exc, CloudflareBlockedError):
-        return {
-            "ok": False,
-            "error": str(exc),
-            "hint": "Cloudflare challenged the request; wait a minute and retry.",
-        }
-    if isinstance(exc, NetworkError):
-        return {
-            "ok": False,
-            "error": str(exc),
-            "hint": "Network problem reaching Dietly; check connectivity and retry.",
-        }
-    if isinstance(exc, NotFoundError):
-        return {
-            "ok": False,
-            "error": str(exc),
-            "hint": "The requested date, slot or order was not found on that order.",
-        }
-    if isinstance(exc, DietlyError):
-        return {
-            "ok": False,
-            "error": str(exc),
-            "hint": "Dietly returned an unexpected error; see the message.",
-        }
-    return {
-        "ok": False,
-        "error": f"{type(exc).__name__}: {exc}",
-        "hint": "Unexpected error inside the Dietly MCP server.",
-    }
-
-
-# --------------------------------------------------------------------------- #
 # Payload builders (pure: they only call the read methods of the client)
 # --------------------------------------------------------------------------- #
-def _compact(payload: dict[str, Any]) -> dict[str, Any]:
-    """Drop ``None`` values so responses stay small."""
-    return {key: value for key, value in payload.items() if value is not None}
-
-
-def _order_summary(order: Order, deliveries_count: int | None = None) -> dict[str, Any]:
-    """Compact, JSON-ready summary of one order."""
-    return _compact(
-        {
-            "orderId": order.order_id,
-            "catering": order.company_name,
-            "cateringName": order.company_display_name,
-            "diet": order.diet_name,
-            "kcal": order.diet_calories,
-            "dateFrom": (order.date_from or "")[:10] or None,
-            "dateTo": (order.date_to or "")[:10] or None,
-            "deliveriesCount": deliveries_count,
-            "mealsPerDay": order.meal_count,
-        }
-    )
-
-
 def _deliveries_count(client: DietlyClient, order_id: int | None) -> int | None:
     """Number of deliveries on an order, or ``None`` when it cannot be read."""
     if order_id is None:
@@ -249,49 +176,6 @@ def _deliveries_count(client: DietlyClient, order_id: int | None) -> int | None:
         raise
     except DietlyError:
         return None
-
-
-def _resolve_order(
-    client: DietlyClient, order_id: int | None, *, today: Any = None
-) -> tuple[Order | None, dict[str, Any] | None]:
-    """Pick the order to act on.
-
-    Returns ``(order, None)`` on success or ``(None, failure_payload)`` when the
-    order is ambiguous, unknown or no longer active — the caller then returns the
-    failure payload unchanged.
-    """
-    active = current_orders(client.get_orders(), today=today)
-    if order_id is not None:
-        for order in active:
-            if order.order_id == order_id:
-                return order, None
-        known = client.get_orders()
-        listing = [_order_summary(order) for order in active]
-        if any(order.order_id == order_id for order in known):
-            return None, {
-                "ok": False,
-                "error": f"Order {order_id} is not currently active "
-                "(its delivery window has ended).",
-                "activeOrders": listing,
-            }
-        return None, {
-            "ok": False,
-            "error": f"No order with id {order_id}.",
-            "activeOrders": listing,
-        }
-    if len(active) == 1:
-        return active[0], None
-    if not active:
-        return None, {
-            "ok": False,
-            "error": "No active orders found for this account.",
-            "activeOrders": [],
-        }
-    return None, {
-        "ok": False,
-        "error": "Several active orders — pass order_id to choose one.",
-        "activeOrders": [_order_summary(order) for order in active],
-    }
 
 
 def status_payload(client: DietlyClient) -> dict[str, Any]:
@@ -572,6 +456,130 @@ def dietly_options(date: str, slot: str, order_id: int | None = None) -> dict[st
     """
     try:
         return _run(lambda client: options_payload(client, date, slot, order_id))
+    except Exception as exc:  # noqa: BLE001 - the tool boundary must never traceback
+        return _failure(exc)
+
+
+# --------------------------------------------------------------------------- #
+# Tools (write)
+#
+# !! These tools MODIFY THE USER'S REAL DIETLY ORDER. !!
+#
+# They are dry-run by default: only an explicit `dry_run=False` sends a request.
+# The calling agent must first run the tool with the default `dry_run=True`,
+# show the preview to the user, and obtain explicit approval before calling it
+# again with `dry_run=False`. Every attempt — dry run, apply or failure — is
+# appended to the JSONL audit log (`~/.local/state/dietly-mcp/audit.jsonl`, path
+# overridable with DIETLY_AUDIT_FILE) and can be undone with `dietly_revert`.
+# --------------------------------------------------------------------------- #
+@server.tool()
+def dietly_switch(
+    date: str,
+    slot: str,
+    to_id: int | str,
+    order_id: int | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Switch one meal slot to another dish — a WRITE to the real Dietly order.
+
+    **This tool modifies the user's real order.** It is dry-run by default:
+    nothing is sent unless you pass `dry_run=False`. Always call it once with the
+    default `dry_run=True`, show the returned preview (current dish → target
+    dish, both ids, kcal, and the order/date/slot context) to the user, and get
+    explicit approval before repeating the call with `dry_run=False`.
+
+    The target is refused (before anything is sent) unless it is among the
+    options Dietly actually offers for that slot — the error lists the valid ids.
+    With `dry_run=True` no request is sent and the payload is the preview; with
+    `dry_run=False` the switch is performed and the payload adds the server
+    result and the audit entry id (`auditId`).
+
+    `date` accepts YYYY-MM-DD or "today"/"tomorrow"; `slot` must match Dietly's
+    spelling (e.g. "Kolacja", "II Śniadanie"), case-insensitively; `to_id` is the
+    `dietCaloriesMealId` from `dietly_options`. The per-day edit cutoff is a
+    heuristic — Dietly may still reject the write. Undo with `dietly_revert`.
+    """
+    try:
+        return _run(
+            lambda client: switch_operation(
+                client,
+                date=date,
+                slot=slot,
+                to_id=to_id,
+                order_id=order_id,
+                dry_run=dry_run,
+                tool="dietly_switch",
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - the tool boundary must never traceback
+        return _failure(exc)
+
+
+@server.tool()
+def dietly_apply(
+    entries: list[dict],
+    order_id: int | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Apply several meal switches in one go — a WRITE to the real Dietly order.
+
+    **This tool modifies the user's real order.** It is dry-run by default:
+    nothing is sent unless you pass `dry_run=False`. Always run it once with the
+    default `dry_run=True`, show the full preview to the user, and get explicit
+    approval before repeating it with `dry_run=False`.
+
+    `entries` is a list of `{"date": "2026-10-29", "slot": "Kolacja",
+    "to_id": 3648}` objects. **All entries are validated before anything is
+    sent**: a shape problem or a target that is not offered makes the whole batch
+    fail fast and return the full list of `problems` (nothing is sent). With
+    `dry_run=True` the payload carries one preview per entry. With
+    `dry_run=False` the switches are applied sequentially and never abort
+    silently: each result has `ok`/`error` plus its `auditId`, and the payload
+    summarises `applied` vs `failed`. Every attempt is audited; undo individual
+    switches with `dietly_revert`.
+    """
+    try:
+        return _run(
+            lambda client: apply_operation(
+                client,
+                entries=entries,
+                order_id=order_id,
+                dry_run=dry_run,
+                tool="dietly_apply",
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - the tool boundary must never traceback
+        return _failure(exc)
+
+
+@server.tool()
+def dietly_revert(
+    audit_id: str | None = None,
+    date: str | None = None,
+    slot: str | None = None,
+) -> dict[str, Any]:
+    """Undo a recorded meal switch — a WRITE to the real Dietly order.
+
+    **This tool modifies the user's real order**, but it *undoes* a switch that
+    is already recorded in the audit log, which makes it the safety net for
+    `dietly_switch`/`dietly_apply`: it restores the previous dish without needing
+    a `dry_run` round-trip. Pass `audit_id` (from a previous write) to revert
+    that exact entry, or only `date`/`slot` to revert the most recent applied
+    switch (optionally filtered). The revert is refused with a clear error — and
+    nothing is sent — when the recorded previous dish is no longer offered or
+    the day is (heuristically) past the editing cutoff. A successful revert is
+    itself audited (`event: "revert"`) and can be re-applied by hand.
+    """
+    try:
+        return _run(
+            lambda client: revert_operation(
+                client,
+                audit_id=audit_id,
+                date=date,
+                slot=slot,
+                tool="dietly_revert",
+            )
+        )
     except Exception as exc:  # noqa: BLE001 - the tool boundary must never traceback
         return _failure(exc)
 

@@ -627,10 +627,16 @@ class RecordingClient:
 
 
 @pytest.fixture
-def cli_client(monkeypatch: pytest.MonkeyPatch) -> RecordingClient:
-    """Patch the CLI's client factory with a recording fake."""
+def cli_client(
+    monkeypatch: pytest.MonkeyPatch, settings: Settings
+) -> RecordingClient:
+    """Patch the CLI's client factory with a recording fake.
+
+    The ``settings`` fixture points the audit log at ``tmp_path`` so the CLI
+    write commands never touch the real state directory.
+    """
     fake = RecordingClient()
-    monkeypatch.setattr(cli, "_client", lambda: (fake, object()))
+    monkeypatch.setattr(cli, "_client", lambda: (fake, settings))
     return fake
 
 
