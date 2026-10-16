@@ -14,8 +14,6 @@ from __future__ import annotations
 import json as jsonlib
 import sys
 from collections.abc import Iterable, Sequence
-from datetime import date as date_cls
-from datetime import timedelta
 from typing import Any
 
 import typer
@@ -24,6 +22,14 @@ from . import __version__
 from .client import DietlyClient, resolve_delivery, resolve_slot
 from .config import Settings, load_credentials, load_settings
 from .errors import DietlyError
+from .logic import (
+    allergen_labels,
+    current_orders,
+    is_editable,
+    nutrition_kcal,
+    parse_date,
+    sort_deliveries,
+)
 from .models import DayMeal, Delivery, Order, SwitchResult
 from .session import Session
 
@@ -91,16 +97,10 @@ def _yes_no(value: bool | None) -> str:
 
 def _kcal(model: Any) -> str:
     """Extract a kcal figure from a ``nutrition`` dict, when present."""
-    nutrition = getattr(model, "nutrition", None)
-    if not isinstance(nutrition, dict):
+    value = nutrition_kcal(model)
+    if value is None:
         return "-"
-    for key in ("calories", "kcal", "energyKcal", "energy", "caloriesKcal"):
-        value = nutrition.get(key)
-        if isinstance(value, (int, float)):
-            return f"{value:g}"
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return "-"
+    return f"{value:g}"
 
 
 def _ids(model: Any) -> str:
@@ -158,14 +158,8 @@ def _select_orders(client: DietlyClient, order_id: int | None) -> list[Order]:
 
 def _parse_date(value: str) -> str:
     """Validate a ``YYYY-MM-DD`` date (``today``/``tomorrow`` also accepted)."""
-    text = (value or "").strip().lower()
-    today = date_cls.today()
-    if text == "today":
-        return today.isoformat()
-    if text == "tomorrow":
-        return (today + timedelta(days=1)).isoformat()
     try:
-        return date_cls.fromisoformat(text).isoformat()
+        return parse_date(value)
     except ValueError as exc:
         raise DietlyError(
             f"Invalid --date {value!r}: expected YYYY-MM-DD (or 'today'/'tomorrow')."
@@ -289,16 +283,24 @@ def _print_orders(orders: Sequence[Order]) -> None:
 def orders(
     json_output: bool = JSON_OPTION,
     all_orders: bool = typer.Option(
-        False, "--all", help="Include non-active (historical/future) orders."
+        False,
+        "--all",
+        help="Include every order, including historical ones (skips the date filter).",
     ),
 ) -> None:
-    """List orders (active only by default)."""
+    """List orders that are still running (use --all to include history)."""
     client, _ = _client()
-    selected = client.get_orders(active_only=not all_orders)
+    known = client.get_orders(active_only=False)
+    selected = known if all_orders else current_orders(known)
     if json_output:
         _dump_json([_dump_model(order) for order in selected])
         return
     _print_orders(selected)
+    if not all_orders and len(selected) < len(known):
+        typer.echo(
+            f"\n({len(known) - len(selected)} historical order(s) hidden; "
+            "run with --all to list them.)"
+        )
 
 
 @app.command()
@@ -306,24 +308,28 @@ def deliveries(
     order: int = ORDER_OPTION,
     json_output: bool = JSON_OPTION,
 ) -> None:
-    """List delivery days per active order (with an editable flag when detectable)."""
-    client, _ = _client()
+    """List delivery days per active order, with an *estimated* editable flag."""
+    client, settings = _client()
     selected = _select_orders(client, order)
 
     payload: list[dict[str, Any]] = []
     text_blocks: list[str] = []
-    todo_seen = False
+    heuristic_seen = False
     for current in selected:
         detail = client.get_order(current.order_id)  # type: ignore[arg-type]
         rows = []
-        for delivery in detail.deliveries:
-            if delivery.editable is None:
-                todo_seen = True
+        for delivery in sort_deliveries(detail.deliveries):
+            editable = delivery.editable
+            if editable is None:
+                editable = is_editable(
+                    delivery.date, cutoff_hours=settings.edit_cutoff_hours
+                )
+                heuristic_seen = True
             rows.append(
                 [
                     delivery.date,
                     delivery.delivery_id,
-                    _yes_no(delivery.editable),
+                    _yes_no(editable),
                     len(delivery.delivery_meals),
                 ]
             )
@@ -332,7 +338,8 @@ def deliveries(
                     "orderId": current.order_id,
                     "deliveryId": delivery.delivery_id,
                     "date": delivery.date,
-                    "editable": delivery.editable,
+                    "editable": editable,
+                    "editableIsHeuristic": delivery.editable is None,
                     "mealCount": len(delivery.delivery_meals),
                 }
             )
@@ -344,10 +351,12 @@ def deliveries(
         return
 
     typer.echo("\n".join(text_blocks))
-    if todo_seen:
+    if heuristic_seen:
         typer.echo(
-            "\nNote: this API version did not expose an editable flag; "
-            "'-' means unknown (TODO: derive it from the ~1.5 day cutoff in a later phase)."
+            f"\nNote: this API version does not expose an editable flag, so EDITABLE is "
+            f"estimated: a day is assumed editable when it starts at least "
+            f"{settings.edit_cutoff_hours:g}h from now (DIETLY_EDIT_CUTOFF_HOURS). "
+            "It is a heuristic — Dietly can still reject a change."
         )
 
 
@@ -390,15 +399,7 @@ def day(
 
 def _allergens_text(allergens: Sequence[Any]) -> str:
     """Render allergen entries (raw API values) as a comma-separated string."""
-    labels: list[str] = []
-    for entry in allergens or []:
-        if isinstance(entry, str):
-            labels.append(entry)
-        elif isinstance(entry, dict):
-            name = entry.get("name") or entry.get("allergenName") or entry.get("code")
-            if name:
-                labels.append(str(name))
-    return ", ".join(labels) or "-"
+    return ", ".join(allergen_labels(allergens)) or "-"
 
 
 @app.command()
@@ -471,6 +472,7 @@ def switch(
         False, "--apply", help="Actually perform the switch. Without it, nothing is sent."
     ),
     amount: int = typer.Option(1, "--amount", help="Number of portions (API expects 1)."),
+    json_output: bool = JSON_OPTION,
 ) -> None:
     """Switch one slot to another meal — DRY RUN unless --apply is given."""
     client, _ = _client()
@@ -496,7 +498,36 @@ def switch(
     )
 
     if not apply:
+        if json_output:
+            _dump_json(
+                {
+                    "dryRun": True,
+                    "applied": False,
+                    "orderId": result.order_id,
+                    "date": iso_date,
+                    "slot": result.slot or day_meal.meal_name,
+                    "deliveryId": delivery.delivery_id,
+                    "deliveryMealId": result.delivery_meal_id,
+                    "from": {
+                        "dietCaloriesMealId": result.previous_diet_calories_meal_id,
+                        "menuMealName": result.previous_menu_meal_name,
+                    },
+                    "to": {
+                        "dietCaloriesMealId": result.diet_calories_meal_id,
+                        "menuMealName": result.target_menu_meal_name,
+                        "dietOptionName": result.target_diet_option_name,
+                    },
+                    "request": {"method": "PUT", "url": url},
+                }
+            )
+            return
         _print_switch_plan(result, url, slot=slot, day=iso_date)
+        return
+
+    if json_output:
+        payload = _dump_model(result)
+        payload["date"] = iso_date
+        _dump_json(payload)
         return
 
     typer.echo(

@@ -1,7 +1,8 @@
-"""dietly-mcp — unofficial Dietly (dietly.pl) API client and debug CLI.
+"""dietly-mcp — unofficial Dietly (dietly.pl) API client, CLI and MCP server.
 
-Phase 1 (F1) ships the API client plus a debug CLI. Phase 2 will expose the
-same client through FastMCP tools (see ``docs/api-notes.md`` and README).
+Phase 2 (F2) ships the read-only MCP server (``dietly_mcp.mcp_server``) alongside
+the API client and debug CLI. Meal switching stays CLI-only; write tools are
+planned for phase 3.
 """
 
 from __future__ import annotations

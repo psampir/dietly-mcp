@@ -56,6 +56,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "DIETLY_CONNECT_TIMEOUT",
         "DIETLY_RETRIES",
         "DIETLY_IPV4_ONLY",
+        "DIETLY_EDIT_CUTOFF_HOURS",
         "EMAIL",
         "USERNAME",
         "PASSWORD",

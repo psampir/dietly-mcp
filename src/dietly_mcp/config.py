@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .errors import MissingCredentialsError
+from .logic import DEFAULT_EDIT_CUTOFF_HOURS
 
 APP_NAME = "dietly-mcp"
 ENV_PREFIX = "DIETLY_"
@@ -243,6 +244,9 @@ class Settings:
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT
     retries: int = DEFAULT_RETRIES
     ipv4_only: bool = True
+    #: Deliveries closer than this are assumed locked; used by the shared
+    #: editable heuristic (``DIETLY_EDIT_CUTOFF_HOURS``).
+    edit_cutoff_hours: float = DEFAULT_EDIT_CUTOFF_HOURS
     credentials_path: Path = field(default_factory=default_credentials_path)
     session_path: Path = field(default_factory=default_session_path)
 
@@ -286,6 +290,9 @@ def load_settings() -> Settings:
         ),
         retries=max(0, _as_int(env.get(ENV_PREFIX + "RETRIES"), DEFAULT_RETRIES)),
         ipv4_only=_as_bool(env.get(ENV_PREFIX + "IPV4_ONLY"), True),
+        edit_cutoff_hours=_as_float(
+            env.get(ENV_PREFIX + "EDIT_CUTOFF_HOURS"), DEFAULT_EDIT_CUTOFF_HOURS
+        ),
         credentials_path=Path(
             env.get(ENV_PREFIX + "CREDENTIALS_FILE", str(default_credentials_path()))
         ).expanduser(),

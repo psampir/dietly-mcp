@@ -864,8 +864,10 @@ def test_end_to_end_login_status_orders_day_options_switch(
     assert "Session: valid (user@example.com)" in status_out
     assert str(ORDER_ID) in status_out
 
-    # 3. orders --json
+    # 3. orders — the default hides "ACTIVE but already finished" orders; --all shows them
     assert cli.run_cli(["orders", "--json"]) == 0
+    assert jsonlib.loads(capsys.readouterr().out) == []
+    assert cli.run_cli(["orders", "--json", "--all"]) == 0
     payload = jsonlib.loads(capsys.readouterr().out)
     assert payload[0]["orderId"] == ORDER_ID
     assert payload[0]["dietCalories"] == 3000

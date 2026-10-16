@@ -617,6 +617,15 @@ def test_settings_transport_env_overrides(monkeypatch: pytest.MonkeyPatch) -> No
     assert settings.ipv4_only is False
 
 
+def test_settings_edit_cutoff_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    from dietly_mcp.config import DEFAULT_EDIT_CUTOFF_HOURS, load_settings
+
+    assert load_settings().edit_cutoff_hours == DEFAULT_EDIT_CUTOFF_HOURS == 36.0
+
+    monkeypatch.setenv("DIETLY_EDIT_CUTOFF_HOURS", "12.5")
+    assert load_settings().edit_cutoff_hours == 12.5
+
+
 def test_settings_defaults_target_the_panel_host() -> None:
     from dietly_mcp.config import Settings as FreshSettings
 

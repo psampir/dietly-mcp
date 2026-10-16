@@ -100,8 +100,9 @@ Key invariants:
 The calendar marks each day as `Edytuj` (editable), `Zobacz` (read-only, past cutoff) or
 `Oceń` (already delivered). The cutoff is roughly **1.5 days before delivery**, so only days about
 two days out or later can be edited; writes beyond the cutoff are rejected by the API.
-F1 only reports what the API exposes (the flag is often absent, which we print as `-`) — deriving
-or enforcing the cutoff belongs to a later phase.
+The API often omits the flag, so `dietly_mcp.logic.is_editable` **estimates** it from a cutoff of
+`DIETLY_EDIT_CUTOFF_HOURS` (default `36`). Both the CLI (`deliveries`) and the MCP tool
+(`dietly_deliveries`) use this heuristic and label it as such — it is not an API guarantee.
 
 ## Failure modes we map to friendly errors
 
@@ -119,10 +120,10 @@ or enforcing the cutoff belongs to a later phase.
 > is deliberately *not* used as a challenge signal. Only `cf-mitigated` and HTML interstitials count.
 
 
-## Phase 2 hook
+## MCP server (phase 2)
 
-The MCP server will not need any new HTTP code: FastMCP tools should wrap
+The read-only MCP server adds no HTTP code: `dietly_mcp.mcp_server` wraps
 `DietlyClient` (`src/dietly_mcp/client.py`) — `get_orders`, `get_order`, `get_day_menu`,
-`get_switch_options`, `switch_meal(dry_run=False)` — and reuse the `DietlyError` hierarchy for
-tool-level error messages. Model → JSON conversion is already available via
-`ApiModel.to_dict()`.
+`get_switch_options` — and reuses the `DietlyError` hierarchy for tool-level error messages
+(`{"ok": false, "error", "hint"}`). Model → JSON conversion is available via `ApiModel.to_dict()`.
+The only write path remains `DietlyClient.switch_meal` (CLI-only until phase 3).
