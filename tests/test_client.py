@@ -30,7 +30,7 @@ from dietly_mcp.errors import (
 from dietly_mcp.models import DayMeal, MealOption, Order, OrderDetail, SwitchResult
 from dietly_mcp.session import Session
 
-ORDER_ID = 152698
+ORDER_ID = 7654321
 DELIVERY_ID = 987654
 SLOT_ID = 555001
 
@@ -299,7 +299,7 @@ def test_490_raises_catering_mismatch(
         200, json={"content": [], "totalPages": 1}
     )
     responses[f"GET /api/company/customer/order/{ORDER_ID}"] = httpx.Response(
-        490, json={"message": "Zamówienie 152698 nie istnieje w tym cateringu"}
+        490, json={"message": "Zamówienie 7654321 nie istnieje w tym cateringu"}
     )
 
     with pytest.raises(CateringMismatchError) as excinfo:
@@ -621,7 +621,7 @@ class RecordingClient:
 
     def switch_meal_url(self, *args: Any, **kwargs: Any) -> str:
         return (
-            "https://dietly.pl/api/company/customer/order/152698/deliveries/987654"
+            "https://dietly.pl/api/company/customer/order/7654321/deliveries/987654"
             f"/delivery-meals/{SLOT_ID}/switch?amount=1&dietCaloriesMealId=2354"
         )
 

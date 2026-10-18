@@ -26,7 +26,7 @@ CSRF_TOKEN = "csrf-token-abc123"
 #: What Dietly's Spring backend answers a state-changing call without a valid
 #: CSRF token (observed live: HTTP 403, no Cloudflare markers).
 CSRF_REJECTION_BODY = {
-    "timestamp": "2026-10-16T14:38:21.386Z",
+    "timestamp": "2026-11-02T14:38:21.386Z",
     "status": 403,
     "error": "Forbidden",
     "path": "/auth/login",

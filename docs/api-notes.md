@@ -6,8 +6,8 @@
 > (see [THIRD_PARTY.md](../THIRD_PARTY.md)). No code was copied. Dietly has no public API and this
 > contract can change at any time.
 >
-> **The auth section below is our own observation** (2026-10-16, verified against the live SPA): the
-> upstream notes predate the CSRF requirement and document a one-request login that no longer works.
+> **The auth section below is our own observation** (verified against the live SPA): the upstream
+> notes predate the CSRF requirement and document a one-request login that no longer works.
 
 ## Transport and headers
 
@@ -24,7 +24,7 @@ After login the app talks to `https://panel.dietly.pl/api/...`. Every call carri
 
 > **Why `panel.dietly.pl` and not `dietly.pl`:** the login response sets a **host-only** `SESSION`
 > cookie for `panel.dietly.pl`, so `https://dietly.pl/api/...` only works if the `remember-me`
-> cookie (which *is* scoped to `.dietly.pl`) happens to be present. Verified live on 2026-10-16:
+> cookie (which *is* scoped to `.dietly.pl`) happens to be present. Verified live:
 > with only `SESSION` in the jar, `dietly.pl/api/profile` → `401` while
 > `panel.dietly.pl/api/profile` → `200`. The panel host is the canonical API host.
 
@@ -81,7 +81,7 @@ and may mix plain strings with `{name, ...}` objects. `dietly-mcp` drops blank e
 
 Both the day menu (`deliveryMenuMeal[]` of `/menus/delivery/{deliveryId}/new`) and every switch
 option (`mealChangeOptions[].menuMealDetails` of the `…/switch` GET) carry a `nutrition` object with
-the **full per-portion** breakdown, verified live on 2026-10-26 (order `3597452`) — for example:
+the **full per-portion** breakdown, verified live (order `1234567`) — for example:
 
 ```json
 {"weight": 535.0, "calories": 427.0, "fat": 15.48, "protein": 38.1, "carbohydrate": 33.44,
@@ -129,16 +129,16 @@ Key invariants:
 - Switches are reversible by sending the previous `dietCaloriesMealId` back, and the original
   notes report no side effects.
 - The success body is the updated meal plus timestamps, e.g.
-  `{"deliveryMealId":228204634,"amount":1,"dietCaloriesMealId":3648,"addedByUser":false,
-  "seen":"SWITCHED","deleted":false,"createdAt":"2026-10-04T17:11:54Z",
-  "deliveryDate":"2026-10-26","updatedAt":"2026-10-16T15:57:19.176111124Z"}`.
+  `{"deliveryMealId":224000001,"amount":1,"dietCaloriesMealId":3648,"addedByUser":false,
+  "seen":"SWITCHED","deleted":false,"createdAt":"2026-11-01T17:11:54Z",
+  "deliveryDate":"2026-11-16","updatedAt":"2026-11-02T15:57:19.176111124Z"}`.
 - A switch does **not** need a separate confirmation step or a body: the whole intent is in the
   query string (`amount`, `dietCaloriesMealId`) plus the `X-XSRF-TOKEN` header.
 - The target id must be one of the ids the `…/switch` GET just returned; sending an arbitrary id is
   refused by `dietly-mcp` before the PUT (and the error lists the valid ids) — see
   `dietly_mcp.operations`.
 
-### Safety rails added in F3 (2026-10-16)
+### Safety rails for the write path
 
 - **dry run first**: `dietly_switch`/`dietly_apply` (MCP) and `dietly-mcp switch` (CLI) only GET
   unless `dry_run=False` / `--apply` is passed.
@@ -158,15 +158,14 @@ The API often omits the flag, so `dietly_mcp.logic.is_editable` **estimates** it
 `DIETLY_EDIT_CUTOFF_HOURS` (default `36`). Both the CLI (`deliveries`) and the MCP tool
 (`dietly_deliveries`) use this heuristic and label it as such — it is not an API guarantee.
 
-### What we observed live (2026-10-16, order `3597452`)
+### What we observed live
 
-- The heuristic marked every future delivery of this order editable, and **Dietly agreed**: a real
-  switch was accepted on `2026-10-29` (13 days out) *and* on `2026-10-26` (10 days out). Both were
-  reverted immediately and the day came back byte-identical.
-- The order's only earlier day, `2026-10-07`, is **in the past** and is reported `EDITABLE=no`
-  (delivered/closed). There is nothing between `2026-10-16` and `2026-10-26`, so **no locked future
-  day existed to probe** and the exact cutoff hour remains unmeasured. We deliberately did not write
-  to the past day.
+- The heuristic marked every future delivery editable, and **Dietly agreed**: real switches on days
+  about ten and thirteen days out were accepted. Both were reverted immediately and the day came
+  back byte-identical.
+- An already-delivered day is reported `EDITABLE=no` (delivered/closed). No locked future day was
+  available to probe, so the exact cutoff hour remains unmeasured — a write was deliberately never
+  sent to a past day.
 - Practical conclusion: the heuristic is *optimistic but harmless* — a wrong "editable" costs one
   rejected request, never a silent change. Keep the default at `36` until a nearer locked day
   (e.g. an order with a delivery tomorrow) can be probed.
@@ -187,19 +186,18 @@ The API often omits the flag, so `dietly_mcp.logic.is_editable` **estimates** it
 > is deliberately *not* used as a challenge signal. Only `cf-mitigated` and HTML interstitials count.
 
 
-## MCP server (phase 2) and the write path (phase 3)
+## MCP server and the write path
 
 `dietly_mcp.mcp_server` adds no HTTP code of its own: it wraps `DietlyClient`
 (`src/dietly_mcp/client.py`) — `get_orders`, `get_order`, `get_day_menu`,
 `get_switch_options` — and reuses the `DietlyError` hierarchy for tool-level error messages
 (`{"ok": false, "error", "hint"}`). Model → JSON conversion is available via `ApiModel.to_dict()`.
 
-Phase 3 adds the write tools on top of the **only** write call,
-`DietlyClient.switch_meal`: `dietly_mcp.operations` holds the shared policy (target must be among
-the offered options, dry-run by default, audit every attempt, revert from the audit record) and is
-imported by both `mcp_server.py` and `cli.py`. `dietly_mcp.audit` writes the append-only JSONL log
-(one record per attempt, `0600`); records carry the previous/new selection so a switch is
-revertible without a second menu read.
+The write tools are built on the **only** write call, `DietlyClient.switch_meal`:
+`dietly_mcp.operations` holds the shared policy (target must be among the offered options, dry-run by
+default, audit every attempt, revert from the audit record) and is imported by both `mcp_server.py`
+and `cli.py`. `dietly_mcp.audit` writes the append-only JSONL log (one record per attempt, `0600`);
+records carry the previous/new selection so a switch is revertible without a second menu read.
 
 Version 0.2.0 surfaces the full nutrition described above: the read tools (`dietly_day`,
 `dietly_options`) and the write tools (`dietly_switch`, `dietly_apply`) attach the compact `macros`

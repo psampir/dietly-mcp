@@ -34,8 +34,8 @@ PAST = (TODAY - timedelta(days=10)).isoformat()
 START = (TODAY - timedelta(days=5)).isoformat()
 END = (TODAY + timedelta(days=30)).isoformat()
 
-ORDER_ID = 3597452
-HISTORICAL_ID = 152698
+ORDER_ID = 1234567
+HISTORICAL_ID = 7654321
 DELIVERY_ID = 987654
 DELIVERY_ID_2 = 987655
 SLOT_BREAKFAST = 555001
@@ -46,8 +46,8 @@ ORDER_ROW = {
     "status": "ACTIVE",
     "dateFrom": START,
     "dateTo": END,
-    "companyName": "kuchniavikinga",
-    "companyDisplayName": "Kuchnia Vikinga",
+    "companyName": "example-catering",
+    "companyDisplayName": "Example Catering",
     "dietName": "Wybór menu",
     "dietCalories": 2000,
     "mealCount": 5,
@@ -65,7 +65,7 @@ HISTORICAL_ROW = {
 
 ORDER_DETAIL = {
     "orderId": ORDER_ID,
-    "companyName": "kuchniavikinga",
+    "companyName": "example-catering",
     "deliveries": [
         {"deliveryId": DELIVERY_ID_2, "date": FUTURE_2, "deliveryMeals": []},
         {"deliveryId": DELIVERY_ID, "date": FUTURE, "deliveryMeals": []},
@@ -320,7 +320,7 @@ def test_orders_payload_filters_history_and_reports_counts() -> None:
     assert result["count"] == 1
     order = result["orders"][0]
     assert order["orderId"] == ORDER_ID
-    assert order["catering"] == "kuchniavikinga"
+    assert order["catering"] == "example-catering"
     assert order["diet"] == "Wybór menu"
     assert order["kcal"] == 2000
     assert order["dateFrom"] == START
@@ -349,7 +349,7 @@ def test_deliveries_payload_flags_near_days_as_locked() -> None:
     fake = FakeClient(
         detail={
             "orderId": ORDER_ID,
-            "companyName": "kuchniavikinga",
+            "companyName": "example-catering",
             "deliveries": [
                 {"deliveryId": 1, "date": TODAY.isoformat(), "deliveryMeals": []},
                 {
@@ -430,7 +430,7 @@ def test_day_payload_accepts_relative_dates() -> None:
     fake = FakeClient(
         detail={
             "orderId": ORDER_ID,
-            "companyName": "kuchniavikinga",
+            "companyName": "example-catering",
             "deliveries": [
                 {"deliveryId": DELIVERY_ID, "date": TODAY.isoformat(), "deliveryMeals": []},
             ],
@@ -731,7 +731,7 @@ def test_switch_dry_run_previews_and_sends_nothing(bind: Any, audit_path: Path) 
     assert result["dryRun"] is True
     assert result["applied"] is False
     assert result["orderId"] == ORDER_ID
-    assert result["catering"] == "kuchniavikinga"
+    assert result["catering"] == "example-catering"
     assert result["date"] == FUTURE
     assert result["slot"] == "Obiad"
     assert result["deliveryId"] == DELIVERY_ID
@@ -763,7 +763,7 @@ def test_switch_dry_run_previews_and_sends_nothing(bind: Any, audit_path: Path) 
     assert entry["from"]["id"] == 2400
     assert entry["to"]["id"] == 2401
     assert entry["order_id"] == ORDER_ID
-    assert entry["catering"] == "kuchniavikinga"
+    assert entry["catering"] == "example-catering"
     assert entry["date"] == FUTURE
     assert entry["slot"] == "Obiad"
     assert entry["delivery_meal_id"] == SLOT_LUNCH
@@ -1070,7 +1070,7 @@ def test_revert_refuses_when_the_previous_meal_is_gone(bind: Any, audit_path: Pa
         dry_run=False,
         tool="dietly_switch",
         order_id=ORDER_ID,
-        catering="kuchniavikinga",
+        catering="example-catering",
         delivery_id=DELIVERY_ID,
         date=FUTURE,
         slot="Obiad",
@@ -1090,7 +1090,7 @@ def test_revert_refuses_when_the_previous_meal_is_gone(bind: Any, audit_path: Pa
 def test_revert_refuses_when_the_day_is_locked(bind: Any, audit_path: Path) -> None:
     locked = {
         "orderId": ORDER_ID,
-        "companyName": "kuchniavikinga",
+        "companyName": "example-catering",
         "deliveries": [
             {"deliveryId": DELIVERY_ID, "date": TODAY.isoformat(), "deliveryMeals": []}
         ],
@@ -1102,7 +1102,7 @@ def test_revert_refuses_when_the_day_is_locked(bind: Any, audit_path: Path) -> N
         dry_run=False,
         tool="dietly_switch",
         order_id=ORDER_ID,
-        catering="kuchniavikinga",
+        catering="example-catering",
         delivery_id=DELIVERY_ID,
         date=TODAY.isoformat(),
         slot="Obiad",
@@ -1230,7 +1230,7 @@ def test_registered_tools_via_in_memory_transport(
     ]
     for result in ("status", "orders", "deliveries", "day", "options", "switch", "apply", "revert"):
         assert out[result].is_error is False, result
-    assert '"orderId": 3597452' in out["orders"].content[0].text
+    assert '"orderId": 1234567' in out["orders"].content[0].text
     assert "Śniadanie" in out["day"].content[0].text
     # The write tools were called with their dry_run default: the previews came
     # back, but nothing was ever sent to Dietly.

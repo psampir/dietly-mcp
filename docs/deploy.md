@@ -31,12 +31,12 @@ Multi-arch images are published to GHCR on every `v*` tag by
 
 ```
 ghcr.io/psampir/dietly-mcp:latest        # newest final release
-ghcr.io/psampir/dietly-mcp:0.1.0         # exact version
-ghcr.io/psampir/dietly-mcp:0.1           # newest patch of 0.1
+ghcr.io/psampir/dietly-mcp:0.2.0         # exact version
+ghcr.io/psampir/dietly-mcp:0.2           # newest patch of 0.2
 ```
 
 Built for `linux/amd64` and `linux/arm64`, with build provenance and an SBOM attached
-(`docker buildx imagetools inspect ghcr.io/psampir/dietly-mcp:0.1.0`).
+(`docker buildx imagetools inspect ghcr.io/psampir/dietly-mcp:0.2.0`).
 
 > **One-time step after the very first push:** the GHCR package is **private by default**. Open
 > `https://github.com/users/psampir/packages/container/dietly-mcp/settings` and set *Package
@@ -59,7 +59,7 @@ podman run -d --name dietly-mcp \
   -e DIETLY_EMAIL=you@example.com \
   -e DIETLY_PASSWORD=<your-password> \
   -v dietly-data:/data \
-  ghcr.io/psampir/dietly-mcp:0.1.0
+  ghcr.io/psampir/dietly-mcp:0.2.0
 
 curl -s http://127.0.0.1:8787/healthz
 ```
@@ -76,7 +76,7 @@ What the container sets for you: `DIETLY_TRANSPORT=streamable-http`, `DIETLY_HTT
 over stdio instead (e.g. from a local client), override the transport and keep stdin open:
 
 ```fish
-podman run -i --rm -e DIETLY_TRANSPORT=stdio -v dietly-data:/data ghcr.io/psampir/dietly-mcp:0.1.0
+podman run -i --rm -e DIETLY_TRANSPORT=stdio -v dietly-data:/data ghcr.io/psampir/dietly-mcp:0.2.0
 ```
 
 ## 3. Credentials
@@ -148,7 +148,7 @@ Tokens are never logged: the start-up banner says *whether* auth is required, ne
 {
   "status": "ok",
   "service": "dietly-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "transport": "streamable-http",
   "mcpPath": "/mcp",
   "uptimeSeconds": 12.34,
@@ -168,7 +168,7 @@ system or an unauthenticated health probe.
 # docker-compose.yml (docker compose up -d)
 services:
   dietly-mcp:
-    image: ghcr.io/psampir/dietly-mcp:0.1.0
+    image: ghcr.io/psampir/dietly-mcp:0.2.0
     container_name: dietly-mcp
     restart: unless-stopped
     ports:
@@ -213,7 +213,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Container]
-Image=ghcr.io/psampir/dietly-mcp:0.1.0
+Image=ghcr.io/psampir/dietly-mcp:0.2.0
 ContainerName=dietly-mcp
 
 # Never expose a non-loopback bind without the token: keep these two together.
@@ -326,7 +326,7 @@ client, scripted end to end (from the host, using the project venv):
 
 ```fish
 set -gx T (openssl rand -hex 32)
-podman run -d --rm --name dietly-probe -p 127.0.0.1:8787:8787 -e MCP_AUTH_TOKEN=$T ghcr.io/psampir/dietly-mcp:0.1.0
+podman run -d --rm --name dietly-probe -p 127.0.0.1:8787:8787 -e MCP_AUTH_TOKEN=$T ghcr.io/psampir/dietly-mcp:0.2.0
 curl -s http://127.0.0.1:8787/healthz                                        # 200, no auth
 curl -si -X POST http://127.0.0.1:8787/mcp -H 'content-type: application/json' \
      -H 'accept: application/json, text/event-stream' \
@@ -340,8 +340,62 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
 podman stop dietly-probe
 ```
 
-**stdio** clients (OpenCode and friends) keep working unchanged — see the README. They never need a
-token: stdio has no network surface.
+**stdio** clients (OpenCode and friends) keep working unchanged. They never need a token: stdio has
+no network surface. Point them at the `dietly-mcp-server` console script (or
+`uv run --directory /path/to/dietly-mcp dietly-mcp-server` when it is not installed globally).
+
+### OpenCode (V2)
+
+Add the server to your OpenCode config (`opencode.jsonc` for one project, or `opencode.json`
+globally):
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "dietly": {
+        "type": "local",
+        "command": ["dietly-mcp-server"],
+        "codemode": false
+      }
+    }
+  }
+}
+```
+
+- OpenCode names each tool `<server>_<tool>`, so the tools appear as `dietly_status`, `dietly_orders`,
+  `dietly_deliveries`, `dietly_day`, `dietly_options`, `dietly_switch`, `dietly_apply` and
+  `dietly_revert`.
+- `codemode` defaults to `true`; with it, tools are reached through the Code Mode `tools` object
+  (`tools.dietly.dietly_status(...)`) rather than as native tools. Set `codemode: false` to keep them
+  **native** so permissions/allow-lists can target `dietly_*` directly.
+- Optional `timeout` overrides exist (defaults: startup `30s`, catalog `30s`, execution `12h`).
+
+Or add it from the CLI:
+
+```fish
+opencode mcp add dietly -- dietly-mcp-server    # add --global for every project
+opencode mcp list                                # verify the server starts and its tools are discovered
+```
+
+### Running the server directly (no container)
+
+The same binary serves both transports, so you can run it from a checkout or a venv:
+
+```fish
+dietly-mcp-server --transport streamable-http            # 127.0.0.1:8787 by default
+dietly-mcp-server --transport streamable-http --host 0.0.0.0 --port 8787
+```
+
+| Option | Env | Default | Notes |
+|---|---|---|---|
+| `--transport` | `DIETLY_TRANSPORT` | `stdio` | `stdio` or `streamable-http` |
+| `--host` | `DIETLY_HTTP_HOST` | `127.0.0.1` | a **non-loopback** bind requires `MCP_AUTH_TOKEN` |
+| `--port` | `DIETLY_HTTP_PORT` | `8787` | |
+| `--version` | — | | print the version and exit |
+
+In HTTP mode logs go to **stdout** (containers, `podman logs`); stdio mode is untouched.
 
 ## 10. Updating
 
@@ -353,7 +407,7 @@ systemctl --user restart dietly-mcp         # quadlet
 podman rm -f dietly-mcp && podman run -d ... ghcr.io/psampir/dietly-mcp:latest
 ```
 
-Pin a version (`:0.1.0`) for reproducible deployments and bump deliberately: a bugfix release cannot
+Pin a version (`:0.2.0`) for reproducible deployments and bump deliberately: a bugfix release cannot
 then change the tool contract under you. The `/data` volume carries the login session and the audit
 log across updates, so an update does not log in again and `dietly_revert` can still see past writes.
 
@@ -383,17 +437,17 @@ grep '^version' pyproject.toml
 
 # 2. tag and push — this runs lint + tests, builds linux/amd64+linux/arm64,
 #    pushes to GHCR with provenance + SBOM, and creates the GitHub Release
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 
 # 3. watch it
 gh run watch
-gh release view v0.1.0
-podman pull ghcr.io/psampir/dietly-mcp:0.1.0
+gh release view v0.2.0
+podman pull ghcr.io/psampir/dietly-mcp:0.2.0
 ```
 
-Yielding tags `0.1.0`, `0.1` and `latest` on `ghcr.io/psampir/dietly-mcp` for `v0.1.0`
-(pre-release tags such as `v0.1.0-rc1` skip `latest`). The image is built by the workflow, not by
+Yielding tags `0.2.0`, `0.2` and `latest` on `ghcr.io/psampir/dietly-mcp` for `v0.2.0`
+(pre-release tags such as `v0.2.0-rc1` skip `latest`). The image is built by the workflow, not by
 `git push` to `main`; a plain push only runs CI (lint + tests).
 
 After the **first** successful push, make the GHCR package public once (GitHub → your profile →

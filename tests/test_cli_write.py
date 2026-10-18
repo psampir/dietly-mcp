@@ -36,7 +36,7 @@ def _seed_applied_switch(log: AuditLog, **overrides: object) -> dict:
         "dry_run": False,
         "tool": "switch",
         "order_id": ORDER_ID,
-        "catering": "kuchniavikinga",
+        "catering": "example-catering",
         "delivery_id": DELIVERY_ID,
         "date": FUTURE,
         "slot": "Obiad",

@@ -1,5 +1,11 @@
 # Third-party attributions
 
+## This project
+
+`dietly-mcp` is released under the **MIT License** — see [LICENSE](LICENSE)
+(`Copyright (c) 2026 Pawel Sampir`). The notices below cover third-party material consulted or
+referenced by this project.
+
 ## dietly-autopilot (API contract knowledge)
 
 The knowledge of Dietly's private JSON API used in this project — endpoints, headers, the
@@ -14,7 +20,7 @@ is based on the reverse-engineering notes published in:
 paraphrased into [`docs/api-notes.md`](docs/api-notes.md) and re-implemented from scratch in this
 repository. All Python code here is original to `dietly-mcp`.
 
-> **Note (2026-10-16):** those notes (dated 2026-06-10) are now **incomplete** — they describe a
+> **Note:** those notes (dated 2026-06-10) are now **incomplete** — they describe a
 > single `POST /api/auth/login` with no CSRF step. The live panel currently requires a Spring
 > Security CSRF token (`XSRF-TOKEN` cookie → `X-XSRF-TOKEN` header), verified against the live SPA
 > bundle. See the "Auth" section of [`docs/api-notes.md`](docs/api-notes.md); that part is our own

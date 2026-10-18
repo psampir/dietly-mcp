@@ -22,7 +22,7 @@ def _record(log: AuditLog, **overrides: object) -> dict:
         "dry_run": False,
         "tool": "t",
         "order_id": 1,
-        "catering": "kuchniavikinga",
+        "catering": "example-catering",
         "delivery_id": 2,
         "date": "2026-10-29",
         "slot": "Kolacja",

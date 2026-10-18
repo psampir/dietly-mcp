@@ -26,8 +26,8 @@ NEAR = TODAY.isoformat()
 START = (TODAY - timedelta(days=5)).isoformat()
 END = (TODAY + timedelta(days=30)).isoformat()
 
-ORDER_ID = 3597452
-HISTORICAL_ID = 152698
+ORDER_ID = 1234567
+HISTORICAL_ID = 7654321
 DELIVERY_ID = 987654
 SLOT_ID = 555001
 
@@ -36,7 +36,7 @@ CURRENT_ROW = {
     "status": "ACTIVE",
     "dateFrom": START,
     "dateTo": END,
-    "companyName": "kuchniavikinga",
+    "companyName": "example-catering",
     "dietName": "Wybór menu",
     "dietCalories": 2000,
 }
@@ -130,7 +130,7 @@ class CliFake:
         return OrderDetail.model_validate(
             {
                 "orderId": order_id,
-                "companyName": "kuchniavikinga",
+                "companyName": "example-catering",
                 "deliveries": [
                     {**delivery, "editable": self._editable} for delivery in self._deliveries
                 ],
