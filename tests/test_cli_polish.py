@@ -57,7 +57,20 @@ DAY_MENU = [
         "deliveryMealId": SLOT_ID,
         "dietCaloriesMealId": 2400,
         "switchable": True,
-        "allergens": [],
+        # A blank allergen array: the live API sends [""] for "no allergens".
+        "allergens": [""],
+        "nutrition": {
+            "weight": 535.0,
+            "calories": 544.0,
+            "protein": 38.1,
+            "carbohydrate": 33.44,
+            "fat": 15.48,
+            "dietaryFiber": 6.31,
+            "sugar": 3.13,
+            "salt": 1.21,
+            "saturatedFattyAcids": 2.25,
+            "caloriesText": "544 kcal / 2276 kJ",
+        },
     }
 ]
 
@@ -68,6 +81,8 @@ SWITCH_OPTIONS = [
             "mealName": "Obiad",
             "menuMealName": "Sałatka z kurczakiem",
             "dietCaloriesMealId": 2400,
+            "allergens": [""],
+            "nutrition": {"calories": 480.0, "protein": 40.0, "carbohydrate": 20.0, "fat": 18.5},
         },
     },
     {
@@ -292,6 +307,47 @@ def test_switch_json_apply(install, capsys: pytest.CaptureFixture[str]) -> None:
     assert payload["dietCaloriesMealId"] == 2401
     assert payload["date"] == FUTURE
     assert fake.switch_calls[0]["dry_run"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Nutrition / macros in the human-readable output and --json
+# --------------------------------------------------------------------------- #
+def test_day_human_output_shows_macros(install, capsys: pytest.CaptureFixture[str]) -> None:
+    install(CliFake(orders=[CURRENT_ROW], deliveries=[_delivery_row()]))
+
+    assert cli.run_cli(["day", "--date", FUTURE]) == 0
+    out = capsys.readouterr().out
+
+    assert "MACROS" in out
+    assert "544 kcal | B 38.1g / W 33.4g / T 15.5g" in out
+
+
+def test_options_human_output_shows_macros(install, capsys: pytest.CaptureFixture[str]) -> None:
+    install(CliFake(orders=[CURRENT_ROW], deliveries=[_delivery_row()]))
+
+    assert cli.run_cli(["options", "--date", FUTURE, "--slot", "Obiad"]) == 0
+    out = capsys.readouterr().out
+
+    assert "MACROS" in out
+    assert "480 kcal | B 40g / W 20g / T 18.5g" in out
+
+
+def test_day_json_stays_raw_but_drops_blank_allergens(
+    install, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install(CliFake(orders=[CURRENT_ROW], deliveries=[_delivery_row()]))
+
+    assert cli.run_cli(["day", "--date", FUTURE, "--json"]) == 0
+    meal = jsonlib.loads(capsys.readouterr().out)["meals"][0]
+
+    # ``--json`` keeps the raw API nutrition, but the blank-allergen noise is gone.
+    assert meal["allergens"] == []
+    assert meal["nutrition"]["calories"] == 544.0
+    assert meal["nutrition"]["protein"] == 38.1
+
+
+def test_macros_text_falls_back_to_a_dash_for_a_meal_without_nutrition() -> None:
+    assert cli._macros_text(DayMeal.model_validate({"mealName": "Obiad"})) == "-"
 
 
 #: Rich/typer help output is styled when a terminal (or FORCE_COLOR) is present,

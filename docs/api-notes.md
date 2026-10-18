@@ -68,10 +68,44 @@ Sanity check: `GET https://panel.dietly.pl/api/profile` → `200` when the sessi
 | `GET /api/profile/profile-order/all?page=0` | all orders, paginated (`totalPages`). Active entries carry `orderId`, `status: "ACTIVE"`, `dateFrom`, `dateTo`, `companyName`, `dietCalories`, `dietName` |
 | `GET /api/profile/profile-order/active-ids` | ids of active orders |
 | `GET /api/company/customer/order/{orderId}` | order detail, incl. `deliveries[]` (`deliveryId`, `date` `YYYY-MM-DD`, `deliveryMeals[]` with `deliveryMealId` + `dietCaloriesMealId`) and `nearestDelivery.deliveryDates[]` |
-| `GET /api/company/general/menus/delivery/{deliveryId}/new` | the day's chosen meals: `deliveryMenuMeal[]`, one per slot, with `mealName`, `menuMealName`, `deliveryMealId`, `dietCaloriesMealId`, `switchable`, `allergens[]`, `allergensWithExcluded[]`, `ingredients[]` (each ingredient has `name` and `exclusion[]` of `{dietaryExclusionId, name, chosen}`) |
+| `GET /api/company/general/menus/delivery/{deliveryId}/new` | the day's chosen meals: `deliveryMenuMeal[]`, one per slot, with `mealName`, `menuMealName`, `deliveryMealId`, `dietCaloriesMealId`, `switchable`, `allergens[]`, `allergensWithExcluded[]`, `ingredients[]` (each ingredient has `name` and `exclusion[]` of `{dietaryExclusionId, name, chosen}`) and `nutrition` (see below) |
 
 Slot names (`mealName`) are Polish and used verbatim: `Śniadanie`, `II Śniadanie`, `Obiad`,
 `Podwieczorek`, `Kolacja`.
+
+Allergen arrays are noisy: the API sends `[""]` (a single empty string) to mean **"no allergens"**,
+and may mix plain strings with `{name, ...}` objects. `dietly-mcp` drops blank entries at parse time
+(`dietly_mcp.models`), so no payload — MCP or CLI `--json` — ever carries the `[""]` placeholder.
+
+## Nutrition (per portion)
+
+Both the day menu (`deliveryMenuMeal[]` of `/menus/delivery/{deliveryId}/new`) and every switch
+option (`mealChangeOptions[].menuMealDetails` of the `…/switch` GET) carry a `nutrition` object with
+the **full per-portion** breakdown, verified live on 2026-10-26 (order `3597452`) — for example:
+
+```json
+{"weight": 535.0, "calories": 427.0, "fat": 15.48, "protein": 38.1, "carbohydrate": 33.44,
+ "dietaryFiber": 6.31, "sugar": 3.13, "salt": 1.21, "saturatedFattyAcids": 2.25,
+ "caloriesText": "427 kcal / 1788 kJ"}
+```
+
+| Raw field | Meaning | Unit | Exposed as |
+|---|---|---|---|
+| `calories` | energy (also `kcal`/`energyKcal`/`energy` on some payloads) | kcal | `kcal` + `macros.kcal` |
+| `protein` | protein | g | `macros.protein` |
+| `carbohydrate` | carbohydrate | g | `macros.carbs` |
+| `fat` | fat | g | `macros.fat` |
+| `dietaryFiber` | dietary fiber | g | `macros.fiber` |
+| `sugar` | sugars | g | `macros.sugar` |
+| `salt` | salt | g | `macros.salt` |
+| `saturatedFattyAcids` | saturated fat | g | `macros.saturates` |
+| `weight` | portion weight | g | `macros.weight` |
+| `caloriesText` | API's own label (`"427 kcal / 1788 kJ"`) | — | `macros.kcalText` |
+
+`dietly_mcp.logic.nutrition_summary` reduces this raw dict to the compact, rounded `macros` shape
+used by every MCP payload and the CLI; `nutrition_kcal` stays as the calorie-only reader for the
+order summary and the audit records. **Source:** observed live on the private API; the field names
+are the API's own (the model keeps `nutrition` as a raw dict, the same way it keeps `ingredients`).
 
 ## Switching a meal (the one write we support)
 
@@ -166,3 +200,8 @@ the offered options, dry-run by default, audit every attempt, revert from the au
 imported by both `mcp_server.py` and `cli.py`. `dietly_mcp.audit` writes the append-only JSONL log
 (one record per attempt, `0600`); records carry the previous/new selection so a switch is
 revertible without a second menu read.
+
+Version 0.2.0 surfaces the full nutrition described above: the read tools (`dietly_day`,
+`dietly_options`) and the write tools (`dietly_switch`, `dietly_apply`) attach the compact `macros`
+dict to every meal — including both the `from` and `to` sides of a switch, in the preview and the
+result — beside the top-level `kcal`.

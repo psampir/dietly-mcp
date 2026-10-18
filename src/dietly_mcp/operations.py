@@ -48,6 +48,7 @@ from .logic import (
     current_orders,
     is_editable,
     nutrition_kcal,
+    nutrition_summary,
     parse_date,
 )
 from .models import DayMeal, MealOption, Order
@@ -230,11 +231,18 @@ def _coerce_id(value: Any) -> int | None:
 
 
 def _meal_ref(model: Any) -> dict[str, Any]:
-    """Describe a meal selection as ``{"id", "name", "kcal"}``."""
+    """Describe a meal selection as ``{"id", "name", "kcal", "macros"}``.
+
+    ``macros`` is the compact nutrition summary (protein/carbs/fat/fiber/sugar/
+    salt/saturates in grams, plus ``weight`` and ``kcalText``); it is attached to
+    both the current and the target dish so a human or agent approving a switch
+    sees the full macros in the preview and the result.
+    """
     return {
         "id": getattr(model, "diet_calories_meal_id", None),
         "name": getattr(model, "menu_meal_name", None),
         "kcal": nutrition_kcal(model),
+        "macros": nutrition_summary(model),
     }
 
 

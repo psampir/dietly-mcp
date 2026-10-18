@@ -17,12 +17,27 @@ from dietly_mcp.logic import (
     is_editable,
     is_order_current,
     nutrition_kcal,
+    nutrition_summary,
     parse_date,
     sort_deliveries,
     sort_orders,
     upcoming_deliveries,
 )
 from dietly_mcp.models import DayMeal, Delivery, MealOption, Order
+
+#: The full ``nutrition`` dict Dietly returns per portion (shape observed live).
+FULL_NUTRITION = {
+    "weight": 535.0,
+    "calories": 427.0,
+    "fat": 15.48,
+    "protein": 38.1,
+    "carbohydrate": 33.44,
+    "dietaryFiber": 6.31,
+    "sugar": 3.13,
+    "salt": 1.21,
+    "saturatedFattyAcids": 2.25,
+    "caloriesText": "427 kcal / 1788 kJ",
+}
 
 TODAY = date(2026, 10, 16)
 
@@ -162,3 +177,57 @@ def test_nutrition_kcal_reads_common_keys() -> None:
     assert nutrition_kcal(option) == 380.0
 
     assert nutrition_kcal(DayMeal.model_validate({"mealName": "Obiad"})) is None
+
+
+def test_nutrition_summary_maps_the_full_field_set() -> None:
+    meal = DayMeal.model_validate({"mealName": "Obiad", "nutrition": FULL_NUTRITION})
+
+    assert nutrition_summary(meal) == {
+        "kcal": 427,
+        "protein": 38.1,
+        "carbs": 33.4,  # from "carbohydrate"
+        "fat": 15.5,
+        "fiber": 6.3,  # from "dietaryFiber"
+        "sugar": 3.1,
+        "salt": 1.2,
+        "saturates": 2.2,  # from "saturatedFattyAcids"
+        "weight": 535,
+        "kcalText": "427 kcal / 1788 kJ",
+    }
+
+
+def test_nutrition_summary_omits_missing_keys() -> None:
+    meal = MealOption.model_validate(
+        {"nutrition": {"calories": 100, "protein": "5.0", "carbohydrate": "12.3"}}
+    )
+
+    assert nutrition_summary(meal) == {"kcal": 100, "protein": 5.0, "carbs": 12.3}
+
+
+def test_nutrition_summary_is_empty_without_nutrition() -> None:
+    assert nutrition_summary(DayMeal.model_validate({"mealName": "Obiad"})) == {}
+    assert nutrition_summary(DayMeal.model_validate({"nutrition": None})) == {}
+    assert nutrition_summary(object()) == {}  # no ``nutrition`` attribute at all
+
+
+def test_allergen_validation_strips_blank_entries() -> None:
+    meal = DayMeal.model_validate(
+        {
+            "mealName": "Obiad",
+            "allergens": ["", "  ", "gluten", {"name": ""}, {"code": None}],
+            "allergensWithExcluded": [""],
+        }
+    )
+    assert meal.allergens == ["gluten"]
+    assert meal.allergens_with_excluded == []
+
+    option = MealOption.model_validate(
+        {
+            "menuMealDetails": {
+                "allergens": [""],
+                "allergensWithExcluded": [{"name": "seler"}],
+            }
+        }
+    )
+    assert option.allergens == []
+    assert option.allergens_with_excluded == [{"name": "seler"}]

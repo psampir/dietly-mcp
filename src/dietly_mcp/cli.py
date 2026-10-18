@@ -30,7 +30,7 @@ from .logic import (
     allergen_labels,
     current_orders,
     is_editable,
-    nutrition_kcal,
+    nutrition_summary,
     parse_date,
     sort_deliveries,
 )
@@ -100,12 +100,28 @@ def _yes_no(value: bool | None) -> str:
     return "yes" if value else "no"
 
 
-def _kcal(model: Any) -> str:
-    """Extract a kcal figure from a ``nutrition`` dict, when present."""
-    value = nutrition_kcal(model)
-    if value is None:
+def _macros_text(model: Any) -> str:
+    """Render a meal's nutrition compactly, e.g. ``544 kcal | B 38g / W 33g / T 15g``.
+
+    ``B``/``W``/``T`` are the Polish initials for protein (białko), carbs
+    (węglowodany) and fat (tłuszcz) — the three figures worth scanning in a
+    table. The full breakdown (fiber, sugar, salt, saturates, weight) stays
+    available in ``--json``. Returns ``"-"`` when the API sent no nutrition.
+    """
+    summary = nutrition_summary(model)
+    if not summary:
         return "-"
-    return f"{value:g}"
+    parts: list[str] = []
+    if summary.get("kcal") is not None:
+        parts.append(f"{summary['kcal']} kcal")
+    grams = " / ".join(
+        f"{label} {summary[key]:g}g"
+        for key, label in (("protein", "B"), ("carbs", "W"), ("fat", "T"))
+        if summary.get(key) is not None
+    )
+    if grams:
+        parts.append(grams)
+    return " | ".join(parts) or "-"
 
 
 def _ids(model: Any) -> str:
@@ -428,6 +444,7 @@ def day(
         [
             meal.meal_name,
             meal.menu_meal_name,
+            _macros_text(meal),
             meal.diet_calories_meal_id,
             meal.delivery_meal_id,
             _yes_no(meal.switchable),
@@ -435,7 +452,12 @@ def day(
         ]
         for meal in meals
     ]
-    typer.echo(_table(["SLOT", "DISH", "MEAL ID", "SLOT ID", "SWITCHABLE", "ALLERGENS"], rows))
+    typer.echo(
+        _table(
+            ["SLOT", "DISH", "MACROS", "MEAL ID", "SLOT ID", "SWITCHABLE", "ALLERGENS"],
+            rows,
+        )
+    )
 
 
 def _allergens_text(allergens: Sequence[Any]) -> str:
@@ -485,8 +507,8 @@ def options(
         [
             option.diet_option_name,
             option.menu_meal_name,
+            _macros_text(option),
             option.diet_calories_meal_id,
-            _kcal(option),
             _yes_no(option.can_be_changed),
             _yes_no(option.meal_recommended),
             _allergens_text(option.allergens),
@@ -495,7 +517,7 @@ def options(
     ]
     typer.echo(
         _table(
-            ["OPTION", "DISH", "MEAL ID", "KCAL", "CHANGEABLE", "RECOMMENDED", "ALLERGENS"],
+            ["OPTION", "DISH", "MACROS", "MEAL ID", "CHANGEABLE", "RECOMMENDED", "ALLERGENS"],
             rows,
         )
     )

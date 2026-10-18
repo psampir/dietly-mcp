@@ -55,6 +55,7 @@ from .logic import (
     current_orders,
     is_editable,
     nutrition_kcal,
+    nutrition_summary,
     parse_date,
     today_iso,
     upcoming_deliveries,
@@ -92,12 +93,16 @@ __all__ = [
 _INSTRUCTIONS = (
     "Tools for a Dietly (dietly.pl) account. Read tools report session and "
     "active-order status, upcoming delivery days, the meals chosen for one day, "
-    "and the alternatives offered for a single slot. The write tools "
+    "and the alternatives offered for a single slot. Every meal in a read or "
+    "write payload carries `macros`: protein/carbs/fat/fiber/sugar/salt/"
+    "saturates in grams, plus `weight` (g) and `kcalText`, alongside the "
+    "top-level `kcal`. The write tools "
     "(dietly_switch, dietly_apply, dietly_revert) MODIFY THE USER'S REAL ORDER: "
     "they are dry-run by default and only write when called with "
     "dry_run=False. Always call a write tool with the default dry_run=True "
     "first, show the returned preview (current dish → target dish, ids, kcal, "
-    "order/date/slot) to the user, and get explicit approval before repeating the "
+    "macros, order/date/slot) to the user, and get explicit approval before "
+    "repeating the "
     "call with dry_run=False. Every attempt is recorded in the audit log and can "
     "be undone with dietly_revert. The per-day edit cutoff is a heuristic and "
     "Dietly may still reject a write. Polish meal and slot names (e.g. \"Obiad\") "
@@ -324,6 +329,7 @@ def day_payload(
                 "slot": meal.meal_name,
                 "dish": meal.menu_meal_name,
                 "kcal": nutrition_kcal(meal),
+                "macros": nutrition_summary(meal),
                 "deliveryMealId": meal.delivery_meal_id,
                 "dietCaloriesMealId": meal.diet_calories_meal_id,
                 "switchable": meal.switchable,
@@ -379,6 +385,7 @@ def options_payload(
                 "variant": option.diet_option_name,
                 "targetId": option.diet_calories_meal_id,
                 "kcal": nutrition_kcal(option),
+                "macros": nutrition_summary(option),
                 "allergens": allergen_labels(option.allergens),
                 "recommended": option.meal_recommended,
                 "changeable": option.can_be_changed,
@@ -466,8 +473,11 @@ def dietly_day(date: str, order_id: int | None = None) -> dict[str, Any]:
     Read-only. Returns one entry per slot (five on a full plan: Śniadanie,
     II Śniadanie, Obiad, Podwieczorek, Kolacja) with the dish name, kcal, the
     slot id (deliveryMealId), the meal id (dietCaloriesMealId) and whether the
-    slot is switchable. `date` accepts YYYY-MM-DD or the words "today" or
-    "tomorrow". Polish slot and dish names are returned verbatim.
+    slot is switchable. Each slot also carries `macros`: the full per-portion
+    nutrition as grams — protein, carbs, fat, fiber, sugar, salt and saturates —
+    plus `weight` (g) and `kcalText` (the API's own "427 kcal / 1788 kJ" label).
+    `date` accepts YYYY-MM-DD or the words "today" or "tomorrow". Polish slot and
+    dish names are returned verbatim.
     """
     try:
         return _run(lambda client: day_payload(client, date, order_id))
@@ -481,9 +491,12 @@ def dietly_options(date: str, slot: str, order_id: int | None = None) -> dict[st
 
     Read-only. For every alternative it returns the dish name, the variant/option
     name, the target id to switch to (dietCaloriesMealId), kcal, allergens and
-    whether it is the currently selected option (that one comes first). `date`
-    accepts YYYY-MM-DD or "today"/"tomorrow"; `slot` must match Dietly's spelling
-    (e.g. "Obiad", "II Śniadanie"), matched case-insensitively.
+    whether it is the currently selected option (that one comes first). Every
+    option also carries `macros`: the full per-portion nutrition as grams —
+    protein, carbs, fat, fiber, sugar, salt and saturates — plus `weight` (g) and
+    `kcalText`, so the alternatives can be compared on macros, not just calories.
+    `date` accepts YYYY-MM-DD or "today"/"tomorrow"; `slot` must match Dietly's
+    spelling (e.g. "Obiad", "II Śniadanie"), matched case-insensitively.
     """
     try:
         return _run(lambda client: options_payload(client, date, slot, order_id))
@@ -516,8 +529,11 @@ def dietly_switch(
     **This tool modifies the user's real order.** It is dry-run by default:
     nothing is sent unless you pass `dry_run=False`. Always call it once with the
     default `dry_run=True`, show the returned preview (current dish → target
-    dish, both ids, kcal, and the order/date/slot context) to the user, and get
-    explicit approval before repeating the call with `dry_run=False`.
+    dish, both ids, kcal, macros, and the order/date/slot context) to the user,
+    and get explicit approval before repeating the call with `dry_run=False`.
+    Both `from` and `to` carry `macros` (protein/carbs/fat/fiber/sugar/salt/
+    saturates in grams, plus `weight` and `kcalText`) in the preview and in the
+    result, so the choice is compared on full nutrition before the write.
 
     The target is refused (before anything is sent) unless it is among the
     options Dietly actually offers for that slot — the error lists the valid ids.
@@ -567,8 +583,11 @@ def dietly_apply(
     `dry_run=True` the payload carries one preview per entry. With
     `dry_run=False` the switches are applied sequentially and never abort
     silently: each result has `ok`/`error` plus its `auditId`, and the payload
-    summarises `applied` vs `failed`. Every attempt is audited; undo individual
-    switches with `dietly_revert`.
+    summarises `applied` vs `failed`. Each preview/result `from` and `to` carries
+    `macros` (protein/carbs/fat/fiber/sugar/salt/saturates in grams, plus
+    `weight` and `kcalText`), so the batch can be reviewed on full nutrition
+    before it is written. Every attempt is audited; undo individual switches with
+    `dietly_revert`.
     """
     try:
         with _WRITE_LOCK:

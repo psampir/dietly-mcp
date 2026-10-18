@@ -24,7 +24,7 @@ The write tools **modify your real Dietly order**. Four rules keep that safe:
 
 1. **Dry-run by default.** `dietly_switch`/`dietly_apply` and `dietly-mcp switch` send nothing unless
    you explicitly pass `dry_run=False` / `--apply`. A dry run only performs GETs and returns a preview
-   (current dish → target dish, both ids, kcal, and the order/date/slot context).
+   (current dish → target dish, both ids, kcal, macros, and the order/date/slot context).
 2. **Show the preview, then approve.** An agent driving these tools must call the write tool with the
    default dry run first, show that preview to the user, and get explicit approval before repeating
    the call with `dry_run=False`.
@@ -171,8 +171,8 @@ guardrail, the dry-run semantics and the audit records cannot drift between the 
 | `dietly_status()` | — | session validity + email, and the genuinely-active order(s) |
 | `dietly_orders()` | — | active orders (id, catering, diet, kcal, date range, deliveries count) |
 | `dietly_deliveries(order_id?)` | optional order id | upcoming delivery days, sorted, with an **estimated** `editable` flag |
-| `dietly_day(date, order_id?)` | `YYYY-MM-DD` / `today` / `tomorrow` | the meals chosen per slot (slot, dish, kcal, ids, switchable) |
-| `dietly_options(date, slot, order_id?)` | date + slot name (e.g. `Obiad`) | alternatives for one slot (dish, variant, target id, kcal, allergens, `current`) |
+| `dietly_day(date, order_id?)` | `YYYY-MM-DD` / `today` / `tomorrow` | the meals chosen per slot (slot, dish, kcal, `macros`, ids, switchable, allergens) |
+| `dietly_options(date, slot, order_id?)` | date + slot name (e.g. `Obiad`) | alternatives for one slot (dish, variant, target id, kcal, `macros`, allergens, `current`) |
 
 **Write tools** — these **modify your real Dietly order**. All three are dry-run by default
 (`dry_run=True`) and only write when called with `dry_run=False`; every attempt is audited.
@@ -183,9 +183,9 @@ guardrail, the dry-run semantics and the audit records cannot drift between the 
 | `dietly_apply(entries, order_id?, dry_run=True)` | `[{"date": "2026-10-29", "slot": "Kolacja", "to_id": 3648}, …]` | validates **all** entries first (fail fast with a list of problems, nothing sent), then previews or applies them sequentially. A real run never aborts silently: each result has `ok`/`error` + its `auditId`, and the payload summarises `applied` vs `failed` |
 | `dietly_revert(audit_id?, date?, slot?)` | audit entry id, or date/slot filter | undoes a recorded switch (**a real write**). Refuses when the recorded dish is gone or the day looks locked; the revert is itself audited |
 
-The write payloads carry the order/date/slot context, the `from`/`to` selections (id, name, kcal),
-the exact `PUT` request and the `auditId` of the record. Dry runs add `"dryRun": true` and never send
-a request.
+The write payloads carry the order/date/slot context, the `from`/`to` selections (id, name, kcal,
+`macros`), the exact `PUT` request and the `auditId` of the record. Dry runs add `"dryRun": true` and
+never send a request.
 
 Design notes:
 
@@ -201,6 +201,29 @@ Design notes:
 - Polish data (`Obiad`, `Śniadanie`, dish names, allergens) is returned **verbatim**.
 - Write tools are **serialised** (a process-wide lock): two switches can never race, and the
   client/session cache is guarded for concurrent requests.
+
+### Nutrition / macros
+
+Every meal in a read or write payload carries the **full nutrition** Dietly returns for a portion,
+not just the calorie figure. Beside the top-level `kcal` (kept for compatibility) there is a compact
+`macros` object:
+
+```json
+"macros": {
+  "kcal": 427, "protein": 38.1, "carbs": 33.4, "fat": 15.5,
+  "fiber": 6.3, "sugar": 3.1, "salt": 1.2, "saturates": 2.2,
+  "weight": 535, "kcalText": "427 kcal / 1788 kJ"
+}
+```
+
+`protein`/`carbs`/`fat`/`fiber`/`sugar`/`salt`/`saturates` are **grams** (rounded to one decimal),
+`weight` is grams, and `kcalText` is the API's own label. `carbs` comes from the API's
+`carbohydrate`, `fiber` from `dietaryFiber`, and `saturates` from `saturatedFattyAcids`; keys the API
+omits are omitted here too. `macros` is present in `dietly_day` (per slot), `dietly_options` (per
+alternative), and on both the `from` and `to` sides of `dietly_switch`/`dietly_apply` — preview
+**and** result — so a switch is approved on full nutrition. The CLI shows the same figures compactly
+(`544 kcal | B 38g / W 33g / T 15g`) in `day` and `options`; `--json` there keeps the raw `nutrition`
+dict as well. Blank allergen entries (the live API's `[""]`) are stripped from every payload.
 
 ### Streamable HTTP transport
 

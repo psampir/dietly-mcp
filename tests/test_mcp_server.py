@@ -422,6 +422,8 @@ def test_day_payload_returns_slots_verbatim(fake: FakeClient) -> None:
     assert first["dietCaloriesMealId"] == 2345
     assert first["switchable"] is True
     assert first["allergens"] == ["jajka"]
+    # The compact nutrition summary is attached to every slot.
+    assert first["macros"] == {"kcal": 420}
 
 
 def test_day_payload_accepts_relative_dates() -> None:
@@ -453,6 +455,73 @@ def test_day_payload_rejects_a_bad_date_string(fake: FakeClient) -> None:
         mcp_server.day_payload(fake, "15-06-2026")
 
 
+#: The full per-portion ``nutrition`` dict the live API returns (masked sample).
+RICH_NUTRITION = {
+    "weight": 535.0,
+    "calories": 427.0,
+    "fat": 15.48,
+    "protein": 38.1,
+    "carbohydrate": 33.44,
+    "dietaryFiber": 6.31,
+    "sugar": 3.13,
+    "salt": 1.21,
+    "saturatedFattyAcids": 2.25,
+    "caloriesText": "427 kcal / 1788 kJ",
+}
+
+RICH_MACROS = {
+    "kcal": 427,
+    "protein": 38.1,
+    "carbs": 33.4,
+    "fat": 15.5,
+    "fiber": 6.3,
+    "sugar": 3.1,
+    "salt": 1.2,
+    "saturates": 2.2,
+    "weight": 535,
+    "kcalText": "427 kcal / 1788 kJ",
+}
+
+
+def test_day_payload_exposes_full_macros_and_strips_blank_allergens() -> None:
+    menu = [
+        {
+            "mealName": "Obiad",
+            "menuMealName": "Dieta Light",
+            "deliveryMealId": SLOT_LUNCH,
+            "dietCaloriesMealId": 2400,
+            "switchable": True,
+            "allergens": [""],
+            "nutrition": RICH_NUTRITION,
+        }
+    ]
+    fake = FakeClient(menus={DELIVERY_ID: menu})
+
+    result = mcp_server.day_payload(fake, FUTURE)
+
+    slot = result["slots"][0]
+    assert slot["kcal"] == 427  # the compatibility field stays
+    assert slot["macros"] == RICH_MACROS
+    assert slot["allergens"] == []  # the live [""] noise is gone
+
+
+def test_day_payload_has_an_empty_macros_dict_without_nutrition() -> None:
+    menu = [
+        {
+            "mealName": "Obiad",
+            "menuMealName": "Bez danych",
+            "deliveryMealId": SLOT_LUNCH,
+            "dietCaloriesMealId": 2400,
+        }
+    ]
+    fake = FakeClient(menus={DELIVERY_ID: menu})
+
+    slot = mcp_server.day_payload(fake, FUTURE)["slots"][0]
+
+    assert slot["macros"] == {}
+    assert "kcal" not in slot
+
+
 # --------------------------------------------------------------------------- #
 # options_payload
 # --------------------------------------------------------------------------- #
@@ -469,7 +538,32 @@ def test_options_payload_marks_current_and_sorts_current_first(fake: FakeClient)
     assert current["current"] is True
     assert current["variant"] == "SPORT"
     assert current["allergens"] == ["seler"]
+    assert current["macros"] == {"kcal": 480}
     assert result["options"][1]["recommended"] is True
+
+
+def test_options_payload_exposes_full_macros_for_every_alternative() -> None:
+    options = [
+        {
+            "dietOptionName": "LIGHT",
+            "menuMealDetails": {
+                "mealName": "Obiad",
+                "menuMealName": "Dieta Light",
+                "dietCaloriesMealId": 2400,
+                "allergens": [""],
+                "nutrition": RICH_NUTRITION,
+            },
+        }
+    ]
+    fake = FakeClient(options={SLOT_LUNCH: options})
+
+    result = mcp_server.options_payload(fake, FUTURE, "Obiad")
+
+    option = result["options"][0]
+    assert option["macros"] == RICH_MACROS
+    assert option["macros"]["protein"] == 38.1
+    assert option["allergens"] == []
+    assert option["current"] is True
 
 
 def test_options_payload_unknown_slot_is_a_clean_error(fake: FakeClient) -> None:
@@ -600,10 +694,16 @@ def test_switch_dry_run_previews_and_sends_nothing(bind: Any, audit_path: Path) 
     assert result["slot"] == "Obiad"
     assert result["deliveryId"] == DELIVERY_ID
     assert result["deliveryMealId"] == SLOT_LUNCH
-    assert result["from"] == {"id": 2400, "name": "Kurczak pieczony z kaszą", "kcal": 700}
+    assert result["from"] == {
+        "id": 2400,
+        "name": "Kurczak pieczony z kaszą",
+        "kcal": 700,
+        "macros": {"kcal": 700},
+    }
     assert result["to"]["id"] == 2401
     assert result["to"]["name"] == "Łosoś z ryżem"
     assert result["to"]["kcal"] == 520
+    assert result["to"]["macros"] == {"kcal": 520}
     assert result["to"]["variant"] == "OPTIMAL"
     assert result["request"]["method"] == "PUT"
     assert "2401" in result["request"]["url"]
@@ -717,6 +817,9 @@ def test_apply_dry_run_previews_every_entry_and_sends_nothing(
     assert result["failed"] == 0
     assert all(row["ok"] and row["auditId"] for row in result["results"])
     assert [row["to"]["id"] for row in result["results"]] == [2401, 2402]
+    # Both sides of every entry carry macros in the preview.
+    assert result["results"][0]["from"]["macros"] == {"kcal": 700}
+    assert result["results"][0]["to"]["macros"] == {"kcal": 520}
     assert fake.applied == []
 
     entries = _audit(audit_path).entries()
@@ -740,6 +843,9 @@ def test_apply_apply_performs_every_write(bind: Any, audit_path: Path) -> None:
     assert result["failed"] == 0
     assert [row["applied"] for row in result["results"]] == [True, True]
     assert [row["target_id"] for row in fake.applied] == [2401, 2402]
+    # The result (not just the preview) still shows the macros that were written.
+    assert result["results"][0]["from"]["macros"] == {"kcal": 700}
+    assert result["results"][0]["to"]["macros"] == {"kcal": 520}
     assert [e["event"] for e in _audit(audit_path).entries()] == ["switch", "switch"]
 
 

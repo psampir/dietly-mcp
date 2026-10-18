@@ -33,6 +33,7 @@ __all__ = [
     "is_editable",
     "is_order_current",
     "nutrition_kcal",
+    "nutrition_summary",
     "parse_date",
     "sort_deliveries",
     "sort_orders",
@@ -216,3 +217,72 @@ def nutrition_kcal(model: Any) -> float | int | None:
             except ValueError:
                 continue
     return None
+
+
+#: Raw API ``nutrition`` keys mapped to the compact names we expose, in order.
+#: The live API sends ``protein``, ``carbohydrate``, ``fat``, ``dietaryFiber``,
+#: ``sugar``, ``salt`` and ``saturatedFattyAcids`` per portion.
+_NUTRITION_MACROS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("protein", ("protein", "proteins")),
+    ("carbs", ("carbohydrate", "carbohydrates", "carbs")),
+    ("fat", ("fat", "fats")),
+    ("fiber", ("dietaryFiber", "fibre", "fiber")),
+    ("sugar", ("sugar", "sugars")),
+    ("salt", ("salt",)),
+    ("saturates", ("saturatedFattyAcids", "saturatedFat", "saturates")),
+)
+
+
+def _as_number(value: Any) -> float | None:
+    """Return ``value`` as a ``float``, or ``None`` when it is not numeric."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def nutrition_summary(model: Any) -> dict[str, Any]:
+    """Compact, JSON-ready nutrition summary for a meal or option model.
+
+    The live API returns a raw ``nutrition`` dict per portion (see
+    ``docs/api-notes.md``); this reduces it to a small, stable shape shared by
+    the CLI and the MCP payloads:
+
+    * ``kcal`` — whole calories (from :func:`nutrition_kcal`);
+    * ``protein`` / ``carbs`` / ``fat`` / ``fiber`` / ``sugar`` / ``salt`` /
+      ``saturates`` — grams, rounded to one decimal (``carbs`` is the API's
+      ``carbohydrate``, ``fiber`` its ``dietaryFiber``, ``saturates`` its
+      ``saturatedFattyAcids``);
+    * ``weight`` — whole grams;
+    * ``kcalText`` — the API's own label, e.g. ``"427 kcal / 1788 kJ"``.
+
+    Keys without a value are omitted. A model with no ``nutrition`` dict yields
+    ``{}`` (never ``None``), so callers can always attach a ``macros`` key.
+    """
+    nutrition = getattr(model, "nutrition", None)
+    if not isinstance(nutrition, dict):
+        return {}
+
+    summary: dict[str, Any] = {}
+    kcal = nutrition_kcal(model)
+    if kcal is not None:
+        summary["kcal"] = int(round(float(kcal)))
+    for name, keys in _NUTRITION_MACROS:
+        for key in keys:
+            value = _as_number(nutrition.get(key))
+            if value is not None:
+                summary[name] = round(value, 1)
+                break
+    weight = _as_number(nutrition.get("weight"))
+    if weight is not None:
+        summary["weight"] = int(round(weight))
+    text = nutrition.get("caloriesText")
+    if isinstance(text, str) and text.strip():
+        summary["kcalText"] = text.strip()
+    return summary

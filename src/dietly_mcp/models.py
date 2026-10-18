@@ -53,6 +53,47 @@ class ApiModel(BaseModel):
         )
 
 
+def _allergen_blank(entry: Any) -> bool:
+    """Whether an allergen entry carries no label at all.
+
+    The live API uses ``[""]`` to mean "no allergens"; dicts with an empty
+    ``name``/``allergenName``/``code`` are equally meaningless.
+    """
+    if isinstance(entry, str):
+        return not entry.strip()
+    if isinstance(entry, dict):
+        label = entry.get("name") or entry.get("allergenName") or entry.get("code")
+        return label is None or not str(label).strip()
+    return False
+
+
+def _drop_blank_allergens(value: Any) -> Any:
+    """Drop blank allergen entries from a raw API list."""
+    if not isinstance(value, list):
+        return value
+    return [entry for entry in value if not _allergen_blank(entry)]
+
+
+class _AllergenMixin(ApiModel):
+    """Shared allergen fields, with the API's blank-entry noise stripped.
+
+    Both :class:`DayMeal` and :class:`MealOption` carry these two lists; the
+    validator removes entries that hold no label so ``[""]`` never reaches a
+    payload (MCP or CLI ``--json``).
+    """
+
+    allergens: list[Any] = Field(default_factory=list)
+    allergens_with_excluded: list[Any] = Field(
+        default_factory=list, **_names("allergensWithExcluded")
+    )
+
+    @field_validator("allergens", "allergens_with_excluded", mode="before")
+    @classmethod
+    def _clean_allergens(cls, value: Any) -> Any:
+        """Drop blank entries (kept as raw values otherwise)."""
+        return _drop_blank_allergens(value)
+
+
 class Order(ApiModel):
     """One order as returned by ``/api/profile/profile-order/all``."""
 
@@ -162,7 +203,7 @@ class OrderDetail(ApiModel):
         return []
 
 
-class DayMeal(ApiModel):
+class DayMeal(_AllergenMixin):
     """One chosen meal for a given day (a slot entry of ``deliveryMenuMeal``)."""
 
     meal_name: str | None = Field(default=None, **_names("mealName", "slotName"))
@@ -172,15 +213,11 @@ class DayMeal(ApiModel):
         default=None, **_names("dietCaloriesMealId", "mealId")
     )
     switchable: bool | None = None
-    allergens: list[Any] = Field(default_factory=list)
-    allergens_with_excluded: list[Any] = Field(
-        default_factory=list, **_names("allergensWithExcluded")
-    )
     ingredients: list[dict[str, Any]] = Field(default_factory=list)
     nutrition: dict[str, Any] | None = None
 
 
-class MealOption(ApiModel):
+class MealOption(_AllergenMixin):
     """One switchable alternative for a slot (``mealChangeOptions`` entry).
 
     The API nests the dish data under ``menuMealDetails``; the validator below
@@ -199,10 +236,6 @@ class MealOption(ApiModel):
     )
     meal_recommended: bool | None = Field(default=None, **_names("mealRecommended", "recommended"))
     review_summary: Any | None = Field(default=None, **_names("reviewSummary"))
-    allergens: list[Any] = Field(default_factory=list)
-    allergens_with_excluded: list[Any] = Field(
-        default_factory=list, **_names("allergensWithExcluded")
-    )
     ingredients: list[dict[str, Any]] = Field(default_factory=list)
     nutrition: dict[str, Any] | None = None
 
