@@ -91,6 +91,18 @@ SWITCH_OPTIONS = [
             "mealName": "Obiad",
             "menuMealName": "Łosoś z ryżem",
             "dietCaloriesMealId": 2401,
+            "nutrition": {
+                "weight": 480.0,
+                "calories": 519.0,
+                "protein": 42.0,
+                "carbohydrate": 43.54,
+                "fat": 18.82,
+                "dietaryFiber": 5.0,
+                "sugar": 4.2,
+                "salt": 1.1,
+                "saturatedFattyAcids": 3.0,
+                "caloriesText": "519 kcal / 2171 kJ",
+            },
         },
     },
 ]
@@ -330,6 +342,21 @@ def test_options_human_output_shows_macros(install, capsys: pytest.CaptureFixtur
 
     assert "MACROS" in out
     assert "480 kcal | B 40g / W 20g / T 18.5g" in out
+
+
+def test_switch_dry_run_human_output_shows_macros_for_both_dishes(
+    install, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install(CliFake(orders=[CURRENT_ROW], deliveries=[_delivery_row()]))
+
+    assert cli.run_cli(["switch", "--date", FUTURE, "--slot", "Obiad", "--to", "2401"]) == 0
+    out = capsys.readouterr().out
+
+    assert "DRY RUN" in out
+    # The current dish (from) …
+    assert "544 kcal | B 38.1g / W 33.4g / T 15.5g" in out
+    # … and the target dish (to) both show their macros in the plan.
+    assert "519 kcal | B 42g / W 43.5g / T 18.8g" in out
 
 
 def test_day_json_stays_raw_but_drops_blank_allergens(

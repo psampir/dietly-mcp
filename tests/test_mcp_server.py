@@ -530,7 +530,11 @@ def test_options_payload_marks_current_and_sorts_current_first(fake: FakeClient)
 
     assert result["ok"] is True
     assert result["slot"] == "Obiad"
-    assert result["current"] == {"dish": "Kurczak pieczony z kaszą", "targetId": 2400}
+    assert result["current"] == {
+        "dish": "Kurczak pieczony z kaszą",
+        "targetId": 2400,
+        "macros": {"kcal": 480},
+    }
     assert result["count"] == 3
     # Current option first, then the recommended one, then the rest.
     assert [o["targetId"] for o in result["options"]] == [2400, 2401, 2402]
@@ -540,6 +544,44 @@ def test_options_payload_marks_current_and_sorts_current_first(fake: FakeClient)
     assert current["allergens"] == ["seler"]
     assert current["macros"] == {"kcal": 480}
     assert result["options"][1]["recommended"] is True
+
+
+def test_options_current_macros_match_the_offered_current_option() -> None:
+    """``current.macros`` mirrors the option entry flagged ``current: true``.
+
+    The day-menu nutrition is deliberately different, so a value of ``999`` here
+    would prove ``current`` read the wrong source.
+    """
+    menu = [
+        {
+            "mealName": "Obiad",
+            "menuMealName": "Dieta Light",
+            "deliveryMealId": SLOT_LUNCH,
+            "dietCaloriesMealId": 2400,
+            "switchable": True,
+            "nutrition": {"calories": 999},
+        }
+    ]
+    options = [
+        {
+            "dietOptionName": "LIGHT",
+            "menuMealDetails": {
+                "mealName": "Obiad",
+                "menuMealName": "Dieta Light",
+                "dietCaloriesMealId": 2400,
+                "allergens": [],
+                "nutrition": RICH_NUTRITION,
+            },
+        }
+    ]
+    fake = FakeClient(menus={DELIVERY_ID: menu}, options={SLOT_LUNCH: options})
+
+    result = mcp_server.options_payload(fake, FUTURE, "Obiad")
+
+    current_option = result["options"][0]
+    assert current_option["current"] is True
+    assert result["current"]["macros"] == current_option["macros"]
+    assert result["current"]["macros"] == RICH_MACROS
 
 
 def test_options_payload_exposes_full_macros_for_every_alternative() -> None:

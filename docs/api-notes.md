@@ -204,4 +204,6 @@ revertible without a second menu read.
 Version 0.2.0 surfaces the full nutrition described above: the read tools (`dietly_day`,
 `dietly_options`) and the write tools (`dietly_switch`, `dietly_apply`) attach the compact `macros`
 dict to every meal — including both the `from` and `to` sides of a switch, in the preview and the
-result — beside the top-level `kcal`.
+result — beside the top-level `kcal`. `dietly_options` carries `macros` on its top-level `current`
+summary too (matching the option entry flagged `current`), and the CLI `switch` plan prints the same
+compact figures for the current and the target dish — in the dry run and in the applied result.

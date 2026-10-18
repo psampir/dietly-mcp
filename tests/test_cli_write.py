@@ -100,6 +100,21 @@ def test_switch_apply_json_carries_the_audit_id(cli_write, capsys) -> None:
     assert fake.switch_calls[0]["dry_run"] is False
 
 
+def test_switch_apply_human_output_shows_macros_for_both_dishes(cli_write, capsys) -> None:
+    fake, _ = cli_write(CliFake(orders=[CURRENT_ROW], deliveries=[_delivery()]))
+
+    assert (
+        cli.run_cli(["switch", "--date", FUTURE, "--slot", "Obiad", "--to", "2401", "--apply"])
+        == 0
+    )
+    out = capsys.readouterr().out
+
+    # The post-apply result shows macros for both the previous and the new dish.
+    assert "544 kcal | B 38.1g / W 33.4g / T 15.5g" in out
+    assert "519 kcal | B 42g / W 43.5g / T 18.8g" in out
+    assert fake.switch_calls[0]["dry_run"] is False
+
+
 def test_switch_refuses_an_unoffered_target_with_a_clean_error(cli_write, capsys) -> None:
     fake, log = cli_write(CliFake(orders=[CURRENT_ROW], deliveries=[_delivery()]))
 

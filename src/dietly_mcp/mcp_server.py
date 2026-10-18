@@ -378,6 +378,13 @@ def options_payload(
         delivery.delivery_id,
         day_meal.delivery_meal_id,  # type: ignore[arg-type]
     )
+    # The ``current`` summary mirrors the option entry flagged ``current: true``,
+    # so its macros match that entry's values (falling back to the day menu's own
+    # nutrition when the API does not offer the selected dish back).
+    current_option = next(
+        (option for option in alternatives if option.diet_calories_meal_id == current_id),
+        None,
+    )
     items = [
         _compact(
             {
@@ -408,7 +415,15 @@ def options_payload(
         "slot": day_meal.meal_name,
         "deliveryId": delivery.delivery_id,
         "deliveryMealId": day_meal.delivery_meal_id,
-        "current": _compact({"dish": day_meal.menu_meal_name, "targetId": current_id}),
+        "current": _compact(
+            {
+                "dish": day_meal.menu_meal_name,
+                "targetId": current_id,
+                "macros": nutrition_summary(
+                    current_option if current_option is not None else day_meal
+                ),
+            }
+        ),
         "count": len(items),
         "options": items,
     }

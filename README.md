@@ -141,9 +141,10 @@ Notes:
   to the wider set when nothing is current.
 - `--slot` takes the slot name **exactly as Dietly spells it**: `Śniadanie`, `II Śniadanie`,
   `Obiad`, `Podwieczorek`, `Kolacja` (matching is case-insensitive, values are never translated).
-- **`switch` is a dry run by default.** It prints the current → target meal, both ids and the
-  exact `PUT` URL it would send, and validates that the target id is among the options the API
-  offers. Only `--apply` performs the switch. `--json` reports the audit entry id (`auditId`).
+- **`switch` is a dry run by default.** It prints the current → target meal with both ids and their
+  macros, plus the exact `PUT` URL it would send, and validates that the target id is among the
+  options the API offers. Only `--apply` performs the switch. `--json` reports the audit entry id
+  (`auditId`).
 - **`revert` undoes a recorded switch** and is a **real write by default** (`--dry-run` to preview).
   With no arguments it reverts the most recent applied switch from the audit log; `--audit-id`
   picks a specific entry and `--date`/`--slot` narrow the search. It refuses — sending nothing — when
@@ -172,7 +173,7 @@ guardrail, the dry-run semantics and the audit records cannot drift between the 
 | `dietly_orders()` | — | active orders (id, catering, diet, kcal, date range, deliveries count) |
 | `dietly_deliveries(order_id?)` | optional order id | upcoming delivery days, sorted, with an **estimated** `editable` flag |
 | `dietly_day(date, order_id?)` | `YYYY-MM-DD` / `today` / `tomorrow` | the meals chosen per slot (slot, dish, kcal, `macros`, ids, switchable, allergens) |
-| `dietly_options(date, slot, order_id?)` | date + slot name (e.g. `Obiad`) | alternatives for one slot (dish, variant, target id, kcal, `macros`, allergens, `current`) |
+| `dietly_options(date, slot, order_id?)` | date + slot name (e.g. `Obiad`) | alternatives for one slot (dish, variant, target id, kcal, `macros`, allergens, `current`); `current` is a summary of the selected dish (`dish`, `targetId`, `macros`) |
 
 **Write tools** — these **modify your real Dietly order**. All three are dry-run by default
 (`dry_run=True`) and only write when called with `dry_run=False`; every attempt is audited.
@@ -220,10 +221,11 @@ not just the calorie figure. Beside the top-level `kcal` (kept for compatibility
 `weight` is grams, and `kcalText` is the API's own label. `carbs` comes from the API's
 `carbohydrate`, `fiber` from `dietaryFiber`, and `saturates` from `saturatedFattyAcids`; keys the API
 omits are omitted here too. `macros` is present in `dietly_day` (per slot), `dietly_options` (per
-alternative), and on both the `from` and `to` sides of `dietly_switch`/`dietly_apply` — preview
-**and** result — so a switch is approved on full nutrition. The CLI shows the same figures compactly
-(`544 kcal | B 38g / W 33g / T 15g`) in `day` and `options`; `--json` there keeps the raw `nutrition`
-dict as well. Blank allergen entries (the live API's `[""]`) are stripped from every payload.
+alternative **and** on the top-level `current` summary), and on both the `from` and `to` sides of
+`dietly_switch`/`dietly_apply` — preview **and** result — so a switch is approved on full nutrition.
+The CLI shows the same figures compactly (`544 kcal | B 38g / W 33g / T 15g`) in `day`, `options`
+**and the `switch` plan** (dry run and applied result); `--json` there keeps the raw `nutrition` dict
+as well. Blank allergen entries (the live API's `[""]`) are stripped from every payload.
 
 ### Streamable HTTP transport
 

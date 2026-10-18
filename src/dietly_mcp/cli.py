@@ -100,16 +100,16 @@ def _yes_no(value: bool | None) -> str:
     return "yes" if value else "no"
 
 
-def _macros_text(model: Any) -> str:
-    """Render a meal's nutrition compactly, e.g. ``544 kcal | B 38g / W 33g / T 15g``.
+def _summary_text(summary: Any) -> str:
+    """Render a compact nutrition summary, e.g. ``544 kcal | B 38g / W 33g / T 15g``.
 
     ``B``/``W``/``T`` are the Polish initials for protein (białko), carbs
     (węglowodany) and fat (tłuszcz) — the three figures worth scanning in a
-    table. The full breakdown (fiber, sugar, salt, saturates, weight) stays
-    available in ``--json``. Returns ``"-"`` when the API sent no nutrition.
+    line. The full breakdown (fiber, sugar, salt, saturates, weight) stays
+    available in ``--json``. Returns ``"-"`` for a missing/empty summary, so a
+    dish without nutrition never reads as zero.
     """
-    summary = nutrition_summary(model)
-    if not summary:
+    if not isinstance(summary, dict) or not summary:
         return "-"
     parts: list[str] = []
     if summary.get("kcal") is not None:
@@ -122,6 +122,11 @@ def _macros_text(model: Any) -> str:
     if grams:
         parts.append(grams)
     return " | ".join(parts) or "-"
+
+
+def _macros_text(model: Any) -> str:
+    """Render a meal's nutrition compactly (see :func:`_summary_text`)."""
+    return _summary_text(nutrition_summary(model))
 
 
 def _ids(model: Any) -> str:
@@ -197,13 +202,6 @@ def _resolve_day(client: DietlyClient, order: Order, day: str) -> tuple[Delivery
     return delivery, meals
 
 
-def _kcal_text(value: Any) -> str:
-    """Format a kcal figure for the human-readable plan (``544.0`` → ``544``)."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return "-" if value is None else str(value)
-    return f"{value:g}"
-
-
 def _print_switch_plan(payload: dict[str, Any]) -> None:
     """Explain a dry-run switch from the operations payload."""
     from_ref = payload.get("from") or {}
@@ -215,9 +213,9 @@ def _print_switch_plan(payload: dict[str, Any]) -> None:
         f"  Date:    {payload.get('date')}",
         f"  Slot:    {payload.get('slot')} (slot id {payload.get('deliveryMealId')})",
         f"  From:    {from_ref.get('name') or '?'} "
-        f"(meal id {from_ref.get('id')}, {_kcal_text(from_ref.get('kcal'))} kcal)",
+        f"(meal id {from_ref.get('id')}, {_summary_text(from_ref.get('macros'))})",
         f"  To:      {to_ref.get('name') or '?'} "
-        f"(meal id {to_ref.get('id')}, {_kcal_text(to_ref.get('kcal'))} kcal{variant})",
+        f"(meal id {to_ref.get('id')}, {_summary_text(to_ref.get('macros'))}{variant})",
         f"  Request: PUT {(payload.get('request') or {}).get('url')}",
         "",
         "Re-run with --apply to perform this switch.",
@@ -574,8 +572,10 @@ def switch(
     suffix = f" [audit {payload['auditId']}]" if payload.get("auditId") else ""
     typer.echo(
         f"Switched {payload.get('slot')} on {payload.get('date')}: "
-        f"{from_ref.get('id')} ({from_ref.get('name') or '?'}) → "
-        f"{to_ref.get('id')} ({to_ref.get('name') or '?'}).{suffix}"
+        f"{from_ref.get('id')} ({from_ref.get('name') or '?'}, "
+        f"{_summary_text(from_ref.get('macros'))}) → "
+        f"{to_ref.get('id')} ({to_ref.get('name') or '?'}, "
+        f"{_summary_text(to_ref.get('macros'))}).{suffix}"
     )
 
 
